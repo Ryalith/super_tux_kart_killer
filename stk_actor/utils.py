@@ -1,3 +1,4 @@
+import torch
 import torch.nn as nn
 
 
@@ -25,3 +26,19 @@ def build_mlp(dims, activation=nn.ReLU(), dropout=0.0):
 
     # Return the model as a nn.Sequential object
     return nn.Sequential(*layers)
+
+
+def stk_state_dict_to_tensor(state) -> torch.Tensor:
+    raise NotImplementedError()
+
+
+def stk_action_dict_to_tensor(action) -> torch.Tensor:
+    raise NotImplementedError()
+
+
+def stk_state_tensor_to_dict(state) -> dict:
+    raise NotImplementedError()
+
+
+def stk_action_tensor_to_dict(action) -> dict:
+    raise NotImplementedError()

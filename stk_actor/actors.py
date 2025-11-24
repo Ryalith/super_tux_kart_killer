@@ -46,14 +46,6 @@ class MyWrapper(gym.ActionWrapper):
         return action
 
 
-def stk_state_to_tensor(state) -> torch.Tensor:
-    raise NotImplementedError()
-
-
-def stk_action_to_tensor(action) -> torch.Tensor:
-    raise NotImplementedError()
-
-
 class SquashedGaussianActor(nn.Module):
     def __init__(self, state_dim, hidden_layers, action_dim, min_std=1e-4):
         """Creates a new Squashed Gaussian actor for use in a SAC Algo
@@ -81,8 +73,7 @@ class SquashedGaussianActor(nn.Module):
     def normal_dist(self, state: torch.Tensor):
         """Compute normal distribution given observation(s)"""
 
-        obs = stk_state_to_tensor(state)
-        backbone_output = self.backbone(obs)
+        backbone_output = self.backbone(state)
         mean = self.last_mean_layer(backbone_output)
         std_out = self.last_std_layer(backbone_output)
         std = self.softplus(std_out) + self.min_std
@@ -116,7 +107,7 @@ class SquashedGaussianActor(nn.Module):
         return action
 
 
-class ContinuousQAgent(nn.Module):
+class ContinuousQCritic(nn.Module):
     def __init__(self, state_dim: int, hidden_layers: list[int], action_dim: int):
         """Creates a new critic agent $Q(s, a)$ for use in a SAC Algo
 
@@ -131,8 +122,6 @@ class ContinuousQAgent(nn.Module):
         )
 
     def forward(self, transition: Transition):
-        obs = stk_state_to_tensor(transition.state)
-        action = stk_action_to_tensor(transition.action)
-        obs_act = torch.cat((obs, action), dim=1)
+        obs_act = torch.cat((transition.state, transition.action), dim=1)
         q_value = self.model(obs_act).squeeze(-1)
         return q_value
