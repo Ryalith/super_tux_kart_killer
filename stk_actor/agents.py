@@ -1,5 +1,6 @@
 import random
 from collections import deque, namedtuple
+from typing import Sequence
 
 import gymnasium as gym
 import torch
@@ -10,43 +11,80 @@ from torch.distributions import (
     TanhTransform,
     TransformedDistribution,
 )
+from torchrl.modules.tensordict_module import ProbabilisticActor, ValueOperator  # noqa: F401
 
-from .utils import build_mlp
+from .utils import build_mlp, build_ortho_mlp
 
 Transition = namedtuple(
     "Transition", ("state", "action", "next_state", "reward", "terminated", "truncated")
 )
 
-
-class ReplayBuffer(object):
-    def __init__(self, capacity):
-        self.memory = deque([], maxlen=capacity)
-
-    def push(self, *args):
-        """Save a transition"""
-        self.memory.append(Transition(*args))
-
-    def sample(self, batch_size) -> Transition:
-        transitions = random.sample(self.memory, batch_size)
-        # See torch DQN tutorial for why we do this
-        batch = Transition(*zip(*transitions))
-        return batch
-
-    def __len__(self):
-        return len(self.memory)
+#
+# PPO Agents
+#
 
 
-class MyWrapper(gym.ActionWrapper):
-    def __init__(self, env, option: int):
-        super().__init__(env)
-        self.option = option
+class PPODiscretePolicyNet(nn.Module):
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dims: Sequence[int],
+        multi_categorical_dims: Sequence[int],
+        Act=nn.ReLU,
+    ):
+        """
+        nn.Module accepting a tensor of observations as input
+        returns the parameters to a torch multi categorical distribution
+        Intended to be used wrapped in a TensorDictModule with a ProbabilisticActor
+        """
+        super().__init__()
+        # TODO: write the net,
+        # since output is meant to be used by multi categorical:
+        # return a Sequence of n outputs
+        layers = []
 
-    def action(self, action):
-        # We do nothing here
-        return action
+        layers.append(nn.Linear(input_dim, hidden_dims[0]))
+        layers.append(Act())
+
+        for i in range(1, len(hidden_dims) - 1):
+            layers.append(nn.Linear(hidden_dims[i], hidden_dims[i + 1]))
+            layers.append(Act())
+
+        embed_dim = hidden_dims[-1]
+        total_categories = sum(multi_categorical_dims)
+        layers.append(nn.Linear(embed_dim, total_categories))
+
+        self.embed = nn.Sequential(*layers)
+
+        self.heads = [nn.Softmax(mctg_dim) for mctg_dim in multi_categorical_dims]
+
+        self.multi_categorical_dims = multi_categorical_dims
+        self.offsets = [0]
+        for i, mctg_dim in enumerate(multi_categorical_dims[:-1]):
+            self.offsets.append(mctg_dim + self.offsets[i])
+
+    def forward(self, obs) -> Sequence[torch.Tensor]:
+        embedding = self.embed(obs)
+        return [
+            # Apply softmax
+            head(embedding[..., offset : offset + mctg_dim])
+            for head, offset, mctg_dim in zip(
+                self.heads, self.offsets, self.multi_categorical_dims
+            )
+        ]
 
 
-class SquashedGaussianActor(nn.Module):
+class PPOValueNet(nn.Module):
+    # Same idea as policy net but for use with a torchrl ValueOperator
+    pass
+
+
+#
+# SAC Agents: Not Working for now
+#
+
+
+class SACContinuousActor(nn.Module):
     def __init__(self, state_dim, hidden_layers, action_dim, min_std=1e-4):
         """Creates a new Squashed Gaussian actor for use in a SAC Algo
 
@@ -107,7 +145,7 @@ class SquashedGaussianActor(nn.Module):
         return action
 
 
-class ContinuousQCritic(nn.Module):
+class SACContinuousQCritic(nn.Module):
     def __init__(self, state_dim: int, hidden_layers: list[int], action_dim: int):
         """Creates a new critic agent $Q(s, a)$ for use in a SAC Algo
 
