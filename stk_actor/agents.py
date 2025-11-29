@@ -2,13 +2,12 @@ from typing import Sequence
 
 import torch
 import torch.nn as nn
+from tensordict.nn import TensorDictModule
 from torch.distributions import MultiDiscrete
-
 from torchrl.modules.tensordict_module import ProbabilisticActor, ValueOperator
 
-from tensordict.nn import TensorDictModule
+from .env import get_action_vector_dims, get_observation_vector_dim
 
-from .env import get_observation_vector_dim, get_action_vector_dims
 #
 # PPO Agents
 #
@@ -53,30 +52,30 @@ class PPODiscretePolicyNet(nn.Module):
         for i, mctg_dim in enumerate(action_dims[:-1]):
             self.offsets.append(mctg_dim + self.offsets[i])
 
-    def forward(self, obs) -> Sequence[torch.Tensor]:
+    def forward(self, continuous, discrete) -> Sequence[torch.Tensor]:
+        obs = torch.cat([continuous, discrete], dim=-1)
         embedding = self.embed(obs)
         logits = [
             # Apply softmax
             head(embedding[..., offset : offset + act_dim])
             for head, offset, act_dim in zip(self.heads, self.offsets, self.action_dims)
         ]
-        return {"logits": logits}
+        return logits
 
 
-class DiscreteProbaActor(ProbabilisticActor):
+class PPODiscreteProbaActor(ProbabilisticActor):
     def __init__(
         self,
         env_specs,
         hidden_net_dims: Sequence[int],
-        Act=nn.ReLU,
     ):
         input_dim = get_observation_vector_dim(env_specs)
         action_dims = get_action_vector_dims(env_specs)
 
-        policy_net = PPODiscretePolicyNet(input_dim, hidden_net_dims, action_dims, Act)
+        policy_net = PPODiscretePolicyNet(input_dim, hidden_net_dims, action_dims)
 
         policy_module = TensorDictModule(
-            policy_net, in_keys=["observation"], out_keys=["logits"]
+            policy_net, in_keys=["continuous", "discrete"], out_keys=["logits"]
         )
 
         super().__init__(
@@ -95,7 +94,40 @@ class DiscreteProbaActor(ProbabilisticActor):
 
 class PPOValueNet(nn.Module):
     # Same idea as policy net but for use with a torchrl ValueOperator
-    pass
+    def __init__(self, input_dim: int, hidden_dims: Sequence[int], Act: nn.Tanh):
+        """
+        nn.Module accepting a tensor of observations as input
+        returns the parameters to a torch multi categorical distribution
+        Intended to be used wrapped in a TensorDictModule with a ProbabilisticActor
+        """
+        super().__init__()
+        # TODO: write the net,
+        # since output is meant to be used by multi categorical:
+        # return a Sequence of n outputs
+        layers = []
+
+        layers.append(nn.Linear(input_dim, hidden_dims[0]))
+        layers.append(Act())
+
+        for i in range(1, len(hidden_dims) - 1):
+            layers.append(nn.Linear(hidden_dims[i], hidden_dims[i + 1]))
+            layers.append(Act())
+
+        layers.append(nn.Linear(hidden_dims[-1], 1))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, continuous, discrete) -> Sequence[torch.Tensor]:
+        obs = torch.cat([continuous, discrete], dim=-1)
+        return self.net(obs)
+
+
+class PPOValueOperator(ValueOperator):
+    def __init__(self, env_specs, hidden_net_dims: Sequence[int]):
+        input_dim = get_action_vector_dims(env_specs)
+
+        value_net = PPOValueNet(input_dim, hidden_net_dims)
+
+        super().__init__(value_net, in_keys=["continuous", "discrete"])
 
 
 #
