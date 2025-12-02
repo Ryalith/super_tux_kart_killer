@@ -1,16 +1,161 @@
-from typing import Sequence
+from functools import partial
+from typing import Int, Sequence
 
 import torch
 import torch.nn as nn
-from tensordict.nn import TensorDictModule
-from torch.distributions import MultiDiscrete
+import torch.nn.functional as F
+from tensordict.nn import CompositeDistribution, TensorDictModule
+from torch import distributions as d
+from torch.distributions import constraints
+from torch.distributions.constraints import Constraint
 from torchrl.modules.tensordict_module import ProbabilisticActor, ValueOperator
+
+from torch.distributions.utils import lazy_property, logits_to_probs, probs_to_logits
 
 from .env import get_action_vector_dims, get_observation_vector_dim
 
 #
 # PPO Agents
 #
+
+class _MultiIntegerInterval(Constraint):
+    """
+    Constrain to multiple integer intervals along the last dimension of the value tensor
+    `[lower_bound_0, lower_bound_1, ...], [upper_bound_0, upper_bound_1, ...]`.
+    """
+
+    is_discrete = True
+
+    def __init__(self, lower_bounds: Sequence[Int], upper_bounds: Sequence[Int]):
+        if len(lower_bounds) != len(upper_bounds):
+            raise ValueError(
+                f"lower and upper bounds should have the same size but found {len(lower_bounds.shape)=} and {len(upper_bounds.shape)=}"
+            )
+        self.lower_bounds = torch.tensor(lower_bounds)
+        self.upper_bounds = torch.tensor(upper_bounds)
+        super().__init__()
+
+    def check(self, value):
+        if value.shape[-1] != self.lower_bounds.shape[-1]:
+            return False
+        return torch.all(
+            (value % 1 == 0)
+            & (self.lower_bounds <= value)
+            & (value <= self.upper_bounds)
+        )
+
+    def __repr__(self):
+        fmt_string = self.__class__.__name__[1:]
+        fmt_string += (
+            f"(lower_bounds={self.lower_bounds}, upper_bounds={self.upper_bounds})"
+        )
+        return fmt_string
+
+multi_integer_interval = _MultiIntegerInterval
+
+class MultiCategorical(d.Distribution):
+    def __init__(
+        self, logits=None, probs=None, n_categories=Sequence[int], validate_args=None
+    ):
+        if (probs is None) == (logits is None):
+            raise ValueError(
+                "Either `probs` or `logits` must be specified, but not both."
+            )
+        if probs is not None:
+            if probs.dim() < 1:
+                raise ValueError("`probs` parameter must be at least one-dimensional.")
+            start = 0
+            for n_cat in n_categories:
+                self.probs[start : start + n_cat] = probs[
+                    start : start + n_cat
+                ] - probs[start : start + n_cat].sum(dim=-1, keepdim=True)
+                start += n_cat
+        else:
+            if logits.dim() < 1:
+                raise ValueError("`logits` parameter must be at least one-dimensional.")
+            # Normalize
+            start = 0
+            for n_cat in n_categories:
+                self.logits[start : start + n_cat] = logits[
+                    start : start + n_cat
+                ] - logits[start : start + n_cat].logsumexp(dim=-1, keepdim=True)
+                start += n_cat
+
+        self._param = self.probs if probs is not None else self.logits
+        if self._param.shape[-1] != sum(n_categories):
+            raise ValueError(
+                f"The number of parameters (probs or logits) should match the total number of categories; but we received param of shape {self._param.shape} and {sum(n_categories)=}"
+            )
+        self._num_params = sum(n_categories)
+        self._n_categories = torch.tensor(n_categories)
+        batch_shape = (
+            self._param.size()[:-1] if self._param.ndimension() > 1 else torch.Size()
+        )
+        event_shape = len(self._n_categories)
+        super().__init__(batch_shape=batch_shape, event_shape=event_shape, validate_args=validate_args)
+
+    @lazy_property
+    def logits(self) -> torch.Tensor:
+        return probs_to_logits(self.probs)
+
+    @lazy_property
+    def probs(self) -> torch.Tensor:
+        return logits_to_probs(self.logits)
+
+    def expand(self, batch_shape, _instance=None):
+        new = self._get_checked_instance(MultiCategorical, _instance)
+        batch_shape = torch.Size(batch_shape)
+        param_shape = batch_shape + torch.Size((self._num_params,))
+        if "probs" in self.__dict__:
+            new.probs = self.probs.expand(param_shape)
+            new._param = new.probs
+        if "logits" in self.__dict__:
+            new.logits = self.logits.expand(param_shape)
+            new._param = new.logits
+        new._num_params = self._num_params
+        super(MultiCategorical, new).__init__(batch_shape, validate_args=False)
+        new._validate_args = self._validate_args
+        return new
+
+    @constraints.dependent_property(is_discrete=True)
+    def support(self):
+        return multi_integer_interval([0] * len(self._n_categories), self._n_categories - 1)
+
+    def sample(self, sample_shape=torch.Size()):
+        if not isinstance(sample_shape, torch.Size):
+            sample_shape = torch.Size(sample_shape)
+        probs_2d = self.probs.reshape(-1, self._num_params)
+        samples_2d = torch.empty((sample_shape.numel(), self._event_shape))
+        start = 0
+        for i, n_cat in enumerate(self._n_categories):
+            samples_2d[:, i] = torch.multinomial(probs_2d[:, start:start+n_cat], sample_shape.numel(), True)
+            start += n_cat
+        return samples_2d.reshape(self._extended_shape(sample_shape))
+
+    def log_prob(self, value):
+        if self._validate_args:
+            self._validate_sample(value)
+        value = value.long().unsqueeze(-1) # batch, _event_shape, 1 
+        # logits of shape _num_params
+        # value, log_pmf = torch.broadcast_tensors(value, self.logits)
+        # value = value[..., :1]
+        # return log_pmf.gather(-1, value).squeeze(-1)
+        # TODO: for loop and gather
+        pass
+
+    # def entropy(self):
+    #     min_real = torch.finfo(self.logits.dtype).min
+    #     logits = torch.clamp(self.logits, min=min_real)
+    #     p_log_p = logits * self.probs
+    #     return -p_log_p.sum(-1)
+
+    # def enumerate_support(self, expand=True):
+    #     num_events = self._num_events
+    #     values = torch.arange(num_events, dtype=torch.long, device=self._param.device)
+    #     values = values.view((-1,) + (1,) * len(self._batch_shape))
+    #     if expand:
+    #         values = values.expand((-1,) + self._batch_shape)
+    #     return values
 
 
 class PPODiscretePolicyNet(nn.Module):
@@ -43,24 +188,23 @@ class PPODiscretePolicyNet(nn.Module):
         total_categories = sum(action_dims)
         layers.append(nn.Linear(embed_dim, total_categories))
 
-        self.embed = nn.Sequential(*layers)
+        self.back_bone = nn.Sequential(*layers)
 
         self.heads = [nn.Softmax(mctg_dim) for mctg_dim in action_dims]
 
-        self.action = action_dims
+        self.action_dims = action_dims
         self.offsets = [0]
         for i, mctg_dim in enumerate(action_dims[:-1]):
             self.offsets.append(mctg_dim + self.offsets[i])
 
     def forward(self, continuous, discrete) -> Sequence[torch.Tensor]:
         obs = torch.cat([continuous, discrete], dim=-1)
-        embedding = self.embed(obs)
-        logits = [
-            # Apply softmax
-            head(embedding[..., offset : offset + act_dim])
-            for head, offset, act_dim in zip(self.heads, self.offsets, self.action_dims)
+        logits = self.back_bone(obs)
+        logits_list = [
+            logits[..., offset : offset + act_dim]
+            for offset, act_dim in zip(self.offsets, self.action_dims)
         ]
-        return logits
+        return tuple(logits_list)
 
 
 class PPODiscreteProbaActor(ProbabilisticActor):
@@ -75,26 +219,32 @@ class PPODiscreteProbaActor(ProbabilisticActor):
         policy_net = PPODiscretePolicyNet(input_dim, hidden_net_dims, action_dims)
 
         policy_module = TensorDictModule(
-            policy_net, in_keys=["continuous", "discrete"], out_keys=["logits"]
+            policy_net,
+            in_keys=["continuous", "discrete"],
+            out_keys=[
+                ("params", f"categ{i}", "logits") for i in range(len(action_dims))
+            ],
         )
 
         super().__init__(
             module=policy_module,
-            spec=env_specs["input_spec"]["full_action_spec"]["action"],
-            in_keys=["logits"],
-            distribution_class=MultiDiscrete,
+            # spec=env_specs["input_spec"]["full_action_spec"]["action"],
+            in_keys=["params"],
+            distribution_class=CompositeDistribution,
             distribution_kwargs={
-                "nvec": torch.tensor(action_dims),
+                "distribution_map": {
+                    f"categ{i}": d.Categorical for i in range(len(action_dims))
+                },
             },
             return_log_prob=True,
             # we'll need the log-prob for the numerator of the importance weights
-            log_prob_key="sample_log_prob",
+            log_prob_keys=[f"sample_log_prob{i}" for i in range(len(action_dims))],
         )
 
 
 class PPOValueNet(nn.Module):
     # Same idea as policy net but for use with a torchrl ValueOperator
-    def __init__(self, input_dim: int, hidden_dims: Sequence[int], Act: nn.Tanh):
+    def __init__(self, input_dim: int, hidden_dims: Sequence[int], Act=nn.Tanh):
         """
         nn.Module accepting a tensor of observations as input
         returns the parameters to a torch multi categorical distribution
@@ -123,7 +273,7 @@ class PPOValueNet(nn.Module):
 
 class PPOValueOperator(ValueOperator):
     def __init__(self, env_specs, hidden_net_dims: Sequence[int]):
-        input_dim = get_action_vector_dims(env_specs)
+        input_dim = get_observation_vector_dim(env_specs)
 
         value_net = PPOValueNet(input_dim, hidden_net_dims)
 

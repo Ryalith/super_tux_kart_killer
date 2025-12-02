@@ -1,6 +1,8 @@
 # TODO: create a wrapper that updates the specs of the pystk2 env for use with torchrl
 # see https://docs.pytorch.org/tutorials/intermediate/reinforcement_ppo.html
 # in the 'Define an environment' section
+from torchrl.envs import GymEnv
+import pystk2_gymnasium
 
 
 def get_observation_vector_dim(env_specs):
@@ -46,3 +48,12 @@ def get_action_vector_dims(env_specs):
     act_spec = env_specs["input_spec"]["full_action_spec"]["action"]
 
     return [box.n for box in act_spec.space]
+
+
+def make_discrete_env():
+    env = GymEnv(
+        "supertuxkart/flattened_multidiscrete-v0",
+        render_mode=None,
+        agent=pystk2_gymnasium.AgentSpec(use_ai=False, name="STKKillerAI"),
+    )
+    return env

@@ -10,12 +10,9 @@
 
 # TODO: add tensorboard loggers to check the status of training
 
-import copy
 from pathlib import Path
 
-import gymnasium as gym
 import torch
-import torchrl
 from torchrl.collectors import SyncDataCollector
 from torchrl.data.replay_buffers import ReplayBuffer
 from torchrl.data.replay_buffers.samplers import SamplerWithoutReplacement
@@ -23,10 +20,7 @@ from torchrl.data.replay_buffers.storages import LazyTensorStorage
 from torchrl.objectives import ClipPPOLoss
 from torchrl.objectives.value import GAE
 
-from .utils import (
-    stk_action_tensor_to_dict,
-    stk_state_dict_to_tensor,
-)
+from .agents import PPODiscreteProbaActor, PPOValueOperator
 
 
 class PPOAlgo:
@@ -35,13 +29,15 @@ class PPOAlgo:
         "batch_size": 128,
         "discount_factor": 0.99,
         "critic_coef": 1.0,
-        "gamma": ...,
-        "lmbda": ...,
-        "clip_epsilon": ...,
-        "entropy_eps": ...,
+        "gamma": 0.98,
+        "lmbda": 0.94,
+        "clip_epsilon": 0.0,
+        "entropy_eps": 0.0,
         "loss_critic_type": "smooth_l1",
-        "lr": ...,
-        "max_grad_norm": ...,
+        "lr": 1e-3,
+        "max_grad_norm": None,
+        "critic_hidden_net_dims": [128,128,128],
+        "actor_hidden_net_dims": [128,128,128],
     }
 
     def __init__(self, env, config: dict | None = None):
@@ -50,12 +46,12 @@ class PPOAlgo:
         """
         self.env = env
         self.config = config if config is not None else self.default_config
-        self.v_critic = ...
-        self.old_v_critic = copy.deepcopy(self.v_critic)
-        self.kl_agent = ...
-        self.ppo_actor = ...
-        self.old_ppo_actor = copy.deepcopy(self.ppo_actor)
-        self.replay_buffer = ReplayBuffer(self.config.buffer_capacity)
+        self.ppo_actor = PPODiscreteProbaActor(
+            self.env.specs, self.config["critic_hidden_net_dims"]
+        )
+        self.v_critic = PPOValueOperator(
+            self.env.specs, self.config["actor_hidden_net_dims"]
+        )
 
     def _train_one_step(
         self,
@@ -83,7 +79,7 @@ class PPOAlgo:
             optim.zero_grad()
             loss_value.backward()
             torch.nn.utils.clip_grad_norm_(
-                loss_module.parameters(), self.config.max_grad_norm
+                loss_module.parameters(), self.config["max_grad_norm"]
             )
             optim.step()
 
@@ -103,8 +99,8 @@ class PPOAlgo:
             sampler=SamplerWithoutReplacement(),
         )
         advantage_module = GAE(
-            gamma=self.config.gamma,
-            lmbda=self.config.lmbda,
+            gamma=self.config["gamma"],
+            lmbda=self.config["lmbda"],
             value_network=self.v_critic,
             average_gae=True,
             device=device,
@@ -113,15 +109,15 @@ class PPOAlgo:
         loss_module = ClipPPOLoss(
             actor_network=self.ppo_actor,
             critic_network=self.v_critic,
-            clip_epsilon=self.config.clip_epsilon,
-            entropy_bonus=bool(self.config.entropy_eps),
-            entropy_coef=self.config.entropy_eps,
+            clip_epsilon=self.config["clip_epsilon"],
+            entropy_bonus=bool(self.config["entropy_eps"]),
+            entropy_coeff=self.config["entropy_eps"],
             # these keys match by default but we set this for completeness
-            critic_coef=self.config.critic_coef,
-            loss_critic_type=self.config.loss_critic_type,  # "smooth_l1",
+            critic_coeff=self.config["critic_coef"],
+            loss_critic_type=self.config["loss_critic_type"],  # "smooth_l1",
         )
 
-        optim = torch.optim.Adam(loss_module.parameters(), self.config.lr)
+        optim = torch.optim.Adam(loss_module.parameters(), self.config["lr"])
 
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optim, total_frames // frames_per_batch, 0.0
@@ -143,51 +139,54 @@ class PPOAlgo:
     def load_checkpoint(self, checkpoint_path: Path):
         pass
 
+    def save_checkpoint(self, checkpoint_path: Path):
+        pass
 
-class SACAlgo:
-    def __init__(self, config):
-        self.env = gym.make(config.env_name)
-        self.actor = ...
-        self.q_critic_1 = ...
-        self.q_critic_2 = ...
-        self.q_tgt_critic_1 = ...
-        self.q_tgt_critic_2 = ...
-        self.replay_buffer = ReplayBuffer(config.replay_buffer_capacity)
 
-    def _fill_replay_buffer(self, max_iter: int):
-        ix = 0
-        done = False
-        state, *_ = self.env.reset()
-
-        while not done:
-            ix += 1
-            state_tensor = stk_state_dict_to_tensor(state)
-            action_tensor = self.actor(state_tensor)
-            action = stk_action_tensor_to_dict(action_tensor)
-            next_state, reward, terminated, truncated, _ = self.env.step(action)
-            next_state_tensor = stk_state_dict_to_tensor(next_state)
-            done = truncated or terminated
-            self.replay_buffer.push(
-                Transition(
-                    state_tensor,
-                    action_tensor,
-                    next_state_tensor,
-                    torch.tensor(reward),
-                    torch.tensor(terminated),
-                    torch.tensor(truncated),
-                )
-            )
-            state = next_state
-            if ix >= max_iter:
-                break
-
-    def _train_on_replay_buffer(self):
-        ...
-        # TODO: define SAC loss compute it and back propagate the loss
-        # There might be a need to change the way the replay buffer is implemented to avoid resampling
-        # Maybe define the deplay buffer as a dataset and create a data loader ?
-
-    def train(self, epochs):
-        for epoch in range(epochs):
-            self._fill_replay_buffer(...)
-            self._train_on_replay_buffer(...)
+# class SACAlgo:
+#     def __init__(self, config):
+#         self.env = gym.make(config.env_name)
+#         self.actor = ...
+#         self.q_critic_1 = ...
+#         self.q_critic_2 = ...
+#         self.q_tgt_critic_1 = ...
+#         self.q_tgt_critic_2 = ...
+#         self.replay_buffer = ReplayBuffer(config.replay_buffer_capacity)
+#
+#     def _fill_replay_buffer(self, max_iter: int):
+#         ix = 0
+#         done = False
+#         state, *_ = self.env.reset()
+#
+#         while not done:
+#             ix += 1
+#             state_tensor = stk_state_dict_to_tensor(state)
+#             action_tensor = self.actor(state_tensor)
+#             action = stk_action_tensor_to_dict(action_tensor)
+#             next_state, reward, terminated, truncated, _ = self.env.step(action)
+#             next_state_tensor = stk_state_dict_to_tensor(next_state)
+#             done = truncated or terminated
+#             self.replay_buffer.push(
+#                 Transition(
+#                     state_tensor,
+#                     action_tensor,
+#                     next_state_tensor,
+#                     torch.tensor(reward),
+#                     torch.tensor(terminated),
+#                     torch.tensor(truncated),
+#                 )
+#             )
+#             state = next_state
+#             if ix >= max_iter:
+#                 break
+#
+#     def _train_on_replay_buffer(self):
+#         ...
+#         # TODO: define SAC loss compute it and back propagate the loss
+#         # There might be a need to change the way the replay buffer is implemented to avoid resampling
+#         # Maybe define the deplay buffer as a dataset and create a data loader ?
+#
+#     def train(self, epochs):
+#         for epoch in range(epochs):
+#             self._fill_replay_buffer(...)
+#             self._train_on_replay_buffer(...)
