@@ -65,11 +65,13 @@ class MultiCategorical(d.Distribution):
                 raise ValueError("`probs` parameter must be at least one-dimensional.")
 
             start = 0
+            segments = []
             for n_cat in n_categories:
-                probs[start : start + n_cat] = probs[start : start + n_cat] - probs[
-                    start : start + n_cat
-                ].sum(dim=-1, keepdim=True)
+                seg = probs[..., start:start + n_cat]
+                seg = seg / seg.sum(dim=-1, keepdim=True)
+                segments.append(seg)
                 start += n_cat
+            probs = torch.cat(segments, dim=-1)
             self.probs = probs
         else:
             if logits.dim() < 1:
@@ -83,7 +85,8 @@ class MultiCategorical(d.Distribution):
                 segments.append(seg)
                 start += n_cat
 
-            self.logits = torch.cat(segments, dim=-1)
+            logits = torch.cat(segments, dim=-1)
+            self.logits = logits
             
 
 
@@ -137,12 +140,18 @@ class MultiCategorical(d.Distribution):
         if not isinstance(sample_shape, torch.Size):
             sample_shape = torch.Size(sample_shape)
         probs_2d = self.probs.reshape(-1, self._num_params)
-        samples_2d = torch.empty((sample_shape.numel(),) + self._event_shape)
+        batch_size = probs_2d.shape[0]
+        samples_2d = torch.empty(
+            sample_shape.numel(), batch_size, len(self._n_categories),
+            dtype=torch.long, device=probs_2d.device
+        )
         start = 0
         for i, n_cat in enumerate(self._n_categories):
-            samples_2d[:, i] = torch.multinomial(
-                probs_2d[:, start : start + n_cat], sample_shape.numel(), True
-            )
+            cat_samples = torch.multinomial(
+                probs_2d[..., start:start + n_cat], sample_shape.numel(), True
+            )   # shape: [batch_size, sample_size]
+
+            samples_2d[:, :, i] = cat_samples.permute(1, 0)
             start += n_cat
         return samples_2d.reshape(self._extended_shape(sample_shape))
 
@@ -177,12 +186,15 @@ class MultiCategorical(d.Distribution):
         """
         Return the mode of the distribution i.e the most probable vector
         """
-        _mode = torch.empty(self._event_shape)
+        _mode = torch.empty(self.logits.shape[:-1] + (len(self._n_categories),), dtype=torch.long, device=self.logits.device)
         start = 0
         for i, n_cat in enumerate(self._n_categories):
-            _mode[i] = self.probs[start : start + n_cat].argmax(dim=-1)
+            _mode[..., i] = self.probs[..., start : start + n_cat].argmax(dim=-1)
             start += n_cat
         return _mode
+
+    def deterministic_sample(self):
+        return self.mode
 
     # def enumerate_support(self, expand=True):
     #     num_events = self._num_events
