@@ -1,5 +1,5 @@
 from functools import partial
-from typing import Int, Sequence
+from typing import Sequence
 
 import torch
 import torch.nn as nn
@@ -12,7 +12,7 @@ from torchrl.modules.tensordict_module import ProbabilisticActor, ValueOperator
 
 from torch.distributions.utils import lazy_property, logits_to_probs, probs_to_logits
 
-from .env import get_action_vector_dims, get_observation_vector_dim
+from env import get_action_vector_dims, get_observation_vector_dim
 
 #
 # PPO Agents
@@ -26,7 +26,7 @@ class _MultiIntegerInterval(Constraint):
 
     is_discrete = True
 
-    def __init__(self, lower_bounds: Sequence[Int], upper_bounds: Sequence[Int]):
+    def __init__(self, lower_bounds: Sequence[int], upper_bounds: Sequence[int]):
         if len(lower_bounds) != len(upper_bounds):
             raise ValueError(
                 f"lower and upper bounds should have the same size but found {len(lower_bounds.shape)=} and {len(upper_bounds.shape)=}"

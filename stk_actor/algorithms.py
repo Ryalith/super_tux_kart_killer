@@ -20,7 +20,12 @@ from torchrl.data.replay_buffers.storages import LazyTensorStorage
 from torchrl.objectives import ClipPPOLoss
 from torchrl.objectives.value import GAE
 
-from .agents import PPODiscreteProbaActor, PPOValueOperator
+from agents import PPODiscreteProbaActor, PPOValueOperator
+from data import get_data_folder, set_data_folder
+from torch.utils.tensorboard import SummaryWriter
+from datetime import datetime
+import os
+import json
 
 
 class PPOAlgo:
@@ -52,8 +57,18 @@ class PPOAlgo:
         self.v_critic = PPOValueOperator(
             self.env.specs, self.config["actor_hidden_net_dims"]
         )
+        current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
+        self.logdir = os.path.join(get_data_folder(), "runs", f"{current_time}-PPO")
+        os.makedirs(self.logdir, exist_ok=True)
+        self.writer = SummaryWriter(self.logdir)
+        with open(os.path.join(self.logdir, "config.json"), "w") as f:
+            json.dump(self.config, f, indent=4)
 
-    def _train_one_step(
+        self.global_step = 0
+        
+
+
+    def _train_one_epoch(
         self,
         tensordict_data,
         advantage_module,
@@ -75,13 +90,18 @@ class PPOAlgo:
                 + loss_vals["loss_critic"]
                 + loss_vals["loss_entropy"]
             )
-
+            self.writer.add_scalar("loss_objective/train", loss_vals["loss_objective"], self.global_step)
+            self.writer.add_scalar("loss_critic/train", loss_vals["loss_critic"], self.global_step)
+            self.writer.add_scalar("loss_entropy/train", loss_vals["loss_entropy"], self.global_step)
             optim.zero_grad()
             loss_value.backward()
             torch.nn.utils.clip_grad_norm_(
                 loss_module.parameters(), self.config["max_grad_norm"]
             )
             optim.step()
+            self.global_step += 1
+        
+
 
     def train(self, total_frames, frames_per_batch, sub_batch_size, device):
         # TODO: check better collectors for parallel execution
@@ -123,8 +143,9 @@ class PPOAlgo:
             optim, total_frames // frames_per_batch, 0.0
         )
 
-        for i, tensordict_data in enumerate(collector):
-            loss_val = self._train_one_step(
+        self.global_step = 0
+        for _, tensordict_data in enumerate(collector):
+            loss_val = self._train_one_epoch(
                 tensordict_data,
                 advantage_module,
                 loss_module,
@@ -133,14 +154,32 @@ class PPOAlgo:
                 frames_per_batch,
                 sub_batch_size,
                 device,
+
             )
             scheduler.step()
 
-    def load_checkpoint(self, checkpoint_path: Path):
-        pass
+        self.save_checkpoint()
 
-    def save_checkpoint(self, checkpoint_path: Path):
-        pass
+    def load_checkpoint(self, checkpoint_path: Path):
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        self.ppo_actor.load_state_dict(checkpoint["ppo_actor_state_dict"])
+        self.v_critic.load_state_dict(checkpoint["v_critic_state_dict"])
+        
+        
+
+    def save_checkpoint(self, checkpoint_path: Path | None = None):
+        checkpoint_path = os.path.join(self.logdir, f"PPO-{self.global_step}.ckpt") if  checkpoint_path is None else checkpoint_path
+        checkpoint = {
+            "ppo_actor_state_dict": self.ppo_actor.state_dict(),
+            "v_critic_state_dict": self.v_critic.state_dict(),
+        }
+        torch.save(checkpoint, checkpoint_path)
+
+if __name__ == "__main__":
+    from env import make_discrete_env
+    set_data_folder(Path("/home/gael/Documents/MS2A/4_RL/super_tux_kart_killer"))
+    ppo = PPOAlgo(make_discrete_env())
+    ppo.save_checkpoint()
 
 
 # class SACAlgo:
