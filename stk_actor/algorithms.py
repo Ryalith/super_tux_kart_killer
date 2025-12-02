@@ -37,7 +37,7 @@ class PPOAlgo:
         "gamma": 0.98,
         "lmbda": 0.94,
         "clip_epsilon": 0.0,
-        "entropy_eps": 0.0,
+        "entropy_eps": 0.1, ## If entropy_eps is 0, loss_entropy will be None and there will be an error
         "loss_critic_type": "smooth_l1",
         "lr": 1e-3,
         "max_grad_norm": None,
@@ -179,7 +179,7 @@ if __name__ == "__main__":
     from env import make_discrete_env
     set_data_folder(Path("/home/gael/Documents/MS2A/4_RL/super_tux_kart_killer"))
     ppo = PPOAlgo(make_discrete_env())
-    ppo.save_checkpoint()
+    ppo.train(128*100, 128, 32, "cpu")
 
 
 # class SACAlgo:
