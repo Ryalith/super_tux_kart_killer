@@ -156,9 +156,11 @@ class MultiCategorical(d.Distribution):
         log_pmf = torch.zeros(values.shape[:-1])
         for i, n_cat in enumerate(self._n_categories):
             value = values[..., i]
-            logits = all_logits[start : start + n_cat]
-            log_pmf += logits.gather(-1, value).squeeze(-1)
+            logits = all_logits[..., start : start + n_cat]
+            log_pmf += logits.gather(-1, value.unsqueeze(-1)).squeeze(-1)
             start += n_cat
+
+        return log_pmf
 
     def entropy(self):
         min_real = torch.finfo(self.logits.dtype).min
