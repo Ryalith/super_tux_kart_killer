@@ -76,12 +76,16 @@ class MultiCategorical(d.Distribution):
                 raise ValueError("`logits` parameter must be at least one-dimensional.")
             # Normalize
             start = 0
+            segments = []
             for n_cat in n_categories:
-                logits[start : start + n_cat] = logits[start : start + n_cat] - logits[
-                    start : start + n_cat
-                ].logsumexp(dim=-1, keepdim=True)
+                seg = logits[..., start : start + n_cat]
+                seg = seg - seg.logsumexp(dim=-1, keepdim=True)
+                segments.append(seg)
                 start += n_cat
-            self.logits = logits
+
+            self.logits = torch.cat(segments, dim=-1)
+            
+
 
         self._param = self.probs if probs is not None else self.logits
         if self._param.shape[-1] != sum(n_categories):
