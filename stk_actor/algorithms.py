@@ -95,9 +95,10 @@ class PPOAlgo:
             self.writer.add_scalar("loss_entropy/train", loss_vals["loss_entropy"], self.global_step)
             optim.zero_grad()
             loss_value.backward()
-            torch.nn.utils.clip_grad_norm_(
-                loss_module.parameters(), self.config["max_grad_norm"]
-            )
+            if self.config["max_grad_norm"] is not None:
+                torch.nn.utils.clip_grad_norm_(
+                    loss_module.parameters(), self.config["max_grad_norm"]
+                )
             optim.step()
             self.global_step += 1
         
@@ -178,8 +179,12 @@ class PPOAlgo:
 if __name__ == "__main__":
     from env import make_discrete_env
     set_data_folder(Path("/home/gael/Documents/MS2A/4_RL/super_tux_kart_killer"))
-    ppo = PPOAlgo(make_discrete_env())
-    ppo.train(128*100, 128, 32, "cpu")
+    env = make_discrete_env()
+    obs, info = env.reset()
+    print("Reset OK, obs shape:", obs.shape if hasattr(obs, "shape") else type(obs))
+    env.close()
+    # ppo = PPOAlgo(env)
+    # ppo.train(128*100, 128, 32, "cpu")
 
 
 # class SACAlgo:
