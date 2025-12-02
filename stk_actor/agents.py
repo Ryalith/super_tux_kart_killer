@@ -18,7 +18,7 @@ from env import get_action_vector_dims, get_observation_vector_dim
 # PPO Agents
 #
 
-class _MultiIntegerInterval(Constraint):
+class _Multiintegerinterval(Constraint):
     """
     Constrain to multiple integer intervals along the last dimension of the value tensor
     `[lower_bound_0, lower_bound_1, ...], [upper_bound_0, upper_bound_1, ...]`.
@@ -51,7 +51,7 @@ class _MultiIntegerInterval(Constraint):
         )
         return fmt_string
 
-multi_integer_interval = _MultiIntegerInterval
+multi_integer_interval = _Multiintegerinterval
 
 class MultiCategorical(d.Distribution):
     def __init__(
@@ -64,22 +64,25 @@ class MultiCategorical(d.Distribution):
         if probs is not None:
             if probs.dim() < 1:
                 raise ValueError("`probs` parameter must be at least one-dimensional.")
+            
             start = 0
             for n_cat in n_categories:
-                self.probs[start : start + n_cat] = probs[
+                probs[start : start + n_cat] = probs[
                     start : start + n_cat
                 ] - probs[start : start + n_cat].sum(dim=-1, keepdim=True)
                 start += n_cat
+            self.probs = probs
         else:
             if logits.dim() < 1:
                 raise ValueError("`logits` parameter must be at least one-dimensional.")
             # Normalize
             start = 0
             for n_cat in n_categories:
-                self.logits[start : start + n_cat] = logits[
+                logits[start : start + n_cat] = logits[
                     start : start + n_cat
                 ] - logits[start : start + n_cat].logsumexp(dim=-1, keepdim=True)
                 start += n_cat
+            self.logits = logits
 
         self._param = self.probs if probs is not None else self.logits
         if self._param.shape[-1] != sum(n_categories):
@@ -91,7 +94,7 @@ class MultiCategorical(d.Distribution):
         batch_shape = (
             self._param.size()[:-1] if self._param.ndimension() > 1 else torch.Size()
         )
-        event_shape = len(self._n_categories)
+        event_shape = (len(self._n_categories),)
         super().__init__(batch_shape=batch_shape, event_shape=event_shape, validate_args=validate_args)
 
     @lazy_property
@@ -125,29 +128,48 @@ class MultiCategorical(d.Distribution):
         if not isinstance(sample_shape, torch.Size):
             sample_shape = torch.Size(sample_shape)
         probs_2d = self.probs.reshape(-1, self._num_params)
-        samples_2d = torch.empty((sample_shape.numel(), self._event_shape))
+        samples_2d = torch.empty((sample_shape.numel(),) +self._event_shape)
         start = 0
         for i, n_cat in enumerate(self._n_categories):
             samples_2d[:, i] = torch.multinomial(probs_2d[:, start:start+n_cat], sample_shape.numel(), True)
             start += n_cat
         return samples_2d.reshape(self._extended_shape(sample_shape))
 
-    def log_prob(self, value):
+    def log_prob(self, values):
         if self._validate_args:
-            self._validate_sample(value)
-        value = value.long().unsqueeze(-1) # batch, _event_shape, 1 
+            self._validate_sample(values)
+        values = values.long() # batch, _event_shape,
         # logits of shape _num_params
         # value, log_pmf = torch.broadcast_tensors(value, self.logits)
         # value = value[..., :1]
         # return log_pmf.gather(-1, value).squeeze(-1)
         # TODO: for loop and gather
-        pass
+        start = 0
+        all_logits = self.logits
+        log_pmf = torch.zeros(values.shape[:-1])
+        for i, n_cat in enumerate(self._n_categories):
+            value = values[..., i]
+            logits = all_logits[start:start+n_cat]
+            log_pmf += logits.gather(-1, value).squeeze(-1)
+            start += n_cat
 
-    # def entropy(self):
-    #     min_real = torch.finfo(self.logits.dtype).min
-    #     logits = torch.clamp(self.logits, min=min_real)
-    #     p_log_p = logits * self.probs
-    #     return -p_log_p.sum(-1)
+    def entropy(self):
+        min_real = torch.finfo(self.logits.dtype).min
+        logits = torch.clamp(self.logits, min=min_real)
+        p_log_p = logits * self.probs
+        return -p_log_p.sum(-1)
+
+    @property
+    def mode(self) -> torch.Tensor:
+        """
+        Return the mode of the distribution i.e the most probable vector
+        """
+        _mode = torch.empty(self._event_shape)
+        start = 0
+        for i, n_cat in enumerate(self._n_categories):
+            _mode[i] = self.probs[start:start+n_cat].argmax(dim=-1)
+            start += n_cat
+        return _mode
 
     # def enumerate_support(self, expand=True):
     #     num_events = self._num_events
@@ -169,7 +191,7 @@ class PPODiscretePolicyNet(nn.Module):
         """
         nn.Module accepting a tensor of observations as input
         returns the parameters to a torch multi categorical distribution
-        Intended to be used wrapped in a TensorDictModule with a ProbabilisticActor
+        intended to be used wrapped in a TensorDictModule with a ProbabilisticActor
         """
         super().__init__()
         # TODO: write the net,
@@ -190,21 +212,15 @@ class PPODiscretePolicyNet(nn.Module):
 
         self.back_bone = nn.Sequential(*layers)
 
-        self.heads = [nn.Softmax(mctg_dim) for mctg_dim in action_dims]
-
-        self.action_dims = action_dims
-        self.offsets = [0]
-        for i, mctg_dim in enumerate(action_dims[:-1]):
-            self.offsets.append(mctg_dim + self.offsets[i])
-
     def forward(self, continuous, discrete) -> Sequence[torch.Tensor]:
         obs = torch.cat([continuous, discrete], dim=-1)
         logits = self.back_bone(obs)
-        logits_list = [
-            logits[..., offset : offset + act_dim]
-            for offset, act_dim in zip(self.offsets, self.action_dims)
-        ]
-        return tuple(logits_list)
+        # logits_list = [
+        #     logits[..., offset : offset + act_dim]
+        #     for offset, act_dim in zip(self.offsets, self.action_dims)
+        # ]
+        # return tuple(logits_list)
+        return logits
 
 
 class PPODiscreteProbaActor(ProbabilisticActor):
@@ -222,23 +238,21 @@ class PPODiscreteProbaActor(ProbabilisticActor):
             policy_net,
             in_keys=["continuous", "discrete"],
             out_keys=[
-                ("params", f"categ{i}", "logits") for i in range(len(action_dims))
+                "logits"
             ],
         )
 
         super().__init__(
             module=policy_module,
             # spec=env_specs["input_spec"]["full_action_spec"]["action"],
-            in_keys=["params"],
-            distribution_class=CompositeDistribution,
+            in_keys=["logits"],
+            distribution_class=MultiCategorical,
             distribution_kwargs={
-                "distribution_map": {
-                    f"categ{i}": d.Categorical for i in range(len(action_dims))
-                },
+                'n_categories': action_dims
             },
             return_log_prob=True,
             # we'll need the log-prob for the numerator of the importance weights
-            log_prob_keys=[f"sample_log_prob{i}" for i in range(len(action_dims))],
+            log_prob_keys=["sample_log_prob"],
         )
 
 
@@ -248,7 +262,7 @@ class PPOValueNet(nn.Module):
         """
         nn.Module accepting a tensor of observations as input
         returns the parameters to a torch multi categorical distribution
-        Intended to be used wrapped in a TensorDictModule with a ProbabilisticActor
+        intended to be used wrapped in a TensorDictModule with a ProbabilisticActor
         """
         super().__init__()
         # TODO: write the net,
