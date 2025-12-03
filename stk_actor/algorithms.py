@@ -10,9 +10,13 @@
 
 # TODO: add tensorboard loggers to check the status of training
 
+import json
+import os
+from datetime import datetime
 from pathlib import Path
 
 import torch
+from torch.utils.tensorboard import SummaryWriter
 from torchrl.collectors import SyncDataCollector
 from torchrl.data.replay_buffers import ReplayBuffer
 from torchrl.data.replay_buffers.samplers import SamplerWithoutReplacement
@@ -20,12 +24,8 @@ from torchrl.data.replay_buffers.storages import LazyTensorStorage
 from torchrl.objectives import ClipPPOLoss
 from torchrl.objectives.value import GAE
 
-from agents import PPODiscreteProbaActor, PPOValueOperator
-from data import get_data_folder, set_data_folder
-from torch.utils.tensorboard import SummaryWriter
-from datetime import datetime
-import os
-import json
+from .agents import PPODiscreteProbaActor, PPOValueOperator
+from .data import get_data_folder, set_data_folder
 
 
 class PPOAlgo:

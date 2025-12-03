@@ -2,18 +2,31 @@ from typing import Sequence
 
 import torch
 import torch.nn as nn
-from env import get_action_vector_dims, get_observation_vector_dim
 from tensordict.nn import TensorDictModule
 from torch import distributions as d
 from torch.distributions import constraints
 from torch.distributions.constraints import Constraint
-from torch.distributions.utils import lazy_property, logits_to_probs, probs_to_logits
+from torch.distributions.utils import lazy_property, probs_to_logits
+from torch.nn import functional as F
 from torchrl.modules.tensordict_module import ProbabilisticActor, ValueOperator
+
+from .env import get_action_vector_dims, get_observation_vector_dim
+
 
 #
 # PPO Agents
 #
-
+def multi_logits_to_probs(logits, n_categories: Sequence[int]):
+    """
+    Converts a tensor of logits into probabilities for a sequence of multinomial variables
+    whose number of possible outcomes is stored in n_categories.
+    """
+    probs = torch.empty_like(logits)
+    start = 0
+    for i, n_cat in enumerate(n_categories):
+        probs[..., start:start+n_cat] = F.softmax(logits[..., start:start+n_cat], dim=-1)
+        start+=n_cat
+    return probs
 
 class _MultiIntegerInterval(Constraint):
     """
@@ -54,7 +67,7 @@ multi_integer_interval = _MultiIntegerInterval
 
 class MultiCategorical(d.Distribution):
     def __init__(
-        self, logits=None, probs=None, n_categories=Sequence[int], validate_args=None
+        self, n_categories: Sequence[int], logits=None, probs=None, validate_args=None
     ):
         if (probs is None) == (logits is None):
             raise ValueError(
@@ -109,11 +122,12 @@ class MultiCategorical(d.Distribution):
 
     @lazy_property
     def logits(self) -> torch.Tensor:
+        # We can reuse probs_to_logits because we are simply clamping and computing a logarithm
         return probs_to_logits(self.probs)
 
     @lazy_property
     def probs(self) -> torch.Tensor:
-        return logits_to_probs(self.logits)
+        return multi_logits_to_probs(self.logits, self._n_categories)
 
     def expand(self, batch_shape, _instance=None):
         new = self._get_checked_instance(MultiCategorical, _instance)
@@ -172,7 +186,6 @@ class MultiCategorical(d.Distribution):
             logits = all_logits[..., start : start + n_cat]
             log_pmf += logits.gather(-1, value.unsqueeze(-1)).squeeze(-1)
             start += n_cat
-
         return log_pmf
 
     def entropy(self):
@@ -193,6 +206,7 @@ class MultiCategorical(d.Distribution):
             start += n_cat
         return _mode
 
+    @property
     def deterministic_sample(self):
         return self.mode
 
@@ -273,7 +287,7 @@ class PPODiscreteProbaActor(ProbabilisticActor):
             distribution_kwargs={"n_categories": action_dims},
             return_log_prob=True,
             # we'll need the log-prob for the numerator of the importance weights
-            log_prob_keys=["sample_log_prob"],
+            log_prob_key="sample_log_prob",
         )
 
 
