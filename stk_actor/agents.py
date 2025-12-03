@@ -23,7 +23,7 @@ def multi_logits_to_probs(logits, n_categories: Sequence[int]):
     """
     probs = torch.empty_like(logits)
     start = 0
-    for i, n_cat in n_categories:
+    for i, n_cat in enumerate(n_categories):
         probs[..., start:start+n_cat] = F.softmax(logits[..., start:start+n_cat], dim=-1)
         start+=n_cat
     return probs
@@ -206,6 +206,7 @@ class MultiCategorical(d.Distribution):
             start += n_cat
         return _mode
 
+    @property
     def deterministic_sample(self):
         return self.mode
 
@@ -286,7 +287,7 @@ class PPODiscreteProbaActor(ProbabilisticActor):
             distribution_kwargs={"n_categories": action_dims},
             return_log_prob=True,
             # we'll need the log-prob for the numerator of the importance weights
-            log_prob_keys=["sample_log_prob"],
+            log_prob_key="sample_log_prob",
         )
 
 
