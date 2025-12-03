@@ -2,14 +2,16 @@ from typing import Sequence
 
 import torch
 import torch.nn as nn
-from env import get_action_vector_dims, get_observation_vector_dim
 from tensordict.nn import TensorDictModule
 from torch import distributions as d
-from torch.nn import functional as F
 from torch.distributions import constraints
 from torch.distributions.constraints import Constraint
 from torch.distributions.utils import lazy_property, probs_to_logits
+from torch.nn import functional as F
 from torchrl.modules.tensordict_module import ProbabilisticActor, ValueOperator
+
+from .env import get_action_vector_dims, get_observation_vector_dim
+
 
 #
 # PPO Agents
