@@ -22,7 +22,9 @@ def multi_logits_to_probs(logits, n_categories: Sequence[int]):
     probs = torch.empty_like(logits)
     start = 0
     for i, n_cat in n_categories:
-        probs[..., start:start+n_cat] = F.softmax(logits[..., start:start+n_cat])
+        probs[..., start:start+n_cat] = F.softmax(logits[..., start:start+n_cat], dim=-1)
+        start+=n_cat
+    return probs
 
 class _MultiIntegerInterval(Constraint):
     """
