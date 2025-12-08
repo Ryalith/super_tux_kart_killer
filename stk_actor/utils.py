@@ -1,5 +1,7 @@
 import torch
 import torch.nn as nn
+import numpy as np
+from typing import List
 
 
 def build_mlp(dims, activation=nn.ReLU(), dropout=0.0):
@@ -25,6 +27,35 @@ def build_mlp(dims, activation=nn.ReLU(), dropout=0.0):
             layers.append(nn.Dropout(dropout))
 
     # Return the model as a nn.Sequential object
+    return nn.Sequential(*layers)
+
+
+def ortho_init(layer, std=np.sqrt(2), bias_const=0.0):
+    """
+    Function used for orthogonal initialization of the layers. Taken from here
+    in the cleanRL library:
+    https://github.com/vwxyzjn/ppo-implementation-details/blob/main/ppo.py
+    """
+    nn.init.orthogonal_(layer.weight, std)
+    nn.init.constant_(layer.bias, bias_const)
+    return layer
+
+
+def build_ortho_mlp(sizes: List[int], activation, output_activation=nn.Identity()):
+    r"""Helper function to build a multi-layer perceptron
+
+    function from $\mathbb R^n$ to $\mathbb R^p$ with orthogonal initialization
+
+    :param sizes: the number of neurons at each layer
+    :param activation: a PyTorch activation function (after each
+        layer but the last)
+    :param output_activation: a PyTorch activation function (last
+        layer)
+    """
+    layers = []
+    for j in range(len(sizes) - 1):
+        act = activation if j < len(sizes) - 2 else output_activation
+        layers += [ortho_init(nn.Linear(sizes[j], sizes[j + 1])), act]
     return nn.Sequential(*layers)
 
 

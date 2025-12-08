@@ -1,3 +1,12 @@
+# Personal notes
+
+Look into torch rl for using their actors/collectors/buffers to try and speed up computations
+
+For use with torchrl: need to specify env, obs, act and rewards specs with a wrapper.
+check spec implementation with check_env_specs(env)
+
+Mixed action spaces are hard: for now focus on either discreet (i.e discretized speeds and accels + the rest) or continous (i.e only speeds and accels).
+
 # PySTK2-gymnasium / BBRL project template
 
 This project template contains a basic structure that could be used for your PySTK2/BBRL project.
