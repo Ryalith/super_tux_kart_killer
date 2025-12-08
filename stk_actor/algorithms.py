@@ -17,7 +17,7 @@ from pathlib import Path
 
 import torch
 from torch.utils.tensorboard import SummaryWriter
-from torchrl.collectors import SyncDataCollector
+from torchrl.collectors import SyncDataCollector, MultiSyncDataCollector
 from torchrl.data.replay_buffers import ReplayBuffer
 from torchrl.data.replay_buffers.samplers import SamplerWithoutReplacement
 from torchrl.data.replay_buffers.storages import LazyTensorStorage
@@ -31,8 +31,6 @@ from .data import get_data_folder, set_data_folder
 
 class PPOAlgo:
     default_config = {
-        "buffer_capactiy": 1024,
-        "batch_size": 128,
         "discount_factor": 0.99,
         "critic_coef": 1.0,
         "gamma": 0.98,
@@ -44,19 +42,27 @@ class PPOAlgo:
         "max_grad_norm": None,
         "critic_hidden_net_dims": [128, 128, 128],
         "actor_hidden_net_dims": [128, 128, 128],
+        "num_env": 6,
     }
 
-    def __init__(self, env, config: dict | None = None):
+    def __init__(
+        self, env=None, env_fn=None, env_specs=None, config: dict | None = None
+    ):
         """
         Instantiate a PPOAlgorithm to be used with discreet actions
         """
+        if env is None and env_fn is None:
+            raise ValueError("Either provide PPOAlgo with env or env_fn and env_specs")
         self.env = env
-        self.config = config if config is not None else self.default_config
+        self.env_fn = env_fn
+        self.config = self.default_config
+        self.config.update(config if config is not None else {})
+        env_specs = env.specs if env else env_specs
         self.ppo_actor = PPODiscreteProbaActor(
-            self.env.specs, self.config["critic_hidden_net_dims"]
+            env_specs, self.config["critic_hidden_net_dims"]
         )
         self.v_critic = PPOValueOperator(
-            self.env.specs, self.config["actor_hidden_net_dims"]
+            env_specs, self.config["actor_hidden_net_dims"]
         )
         current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
         self.logdir = os.path.join(get_data_folder(), "runs", f"{current_time}-PPO")
@@ -117,14 +123,28 @@ class PPOAlgo:
 
     def train(self, total_frames, frames_per_batch, sub_batch_size, device):
         # TODO: check better collectors for parallel execution
-        collector = SyncDataCollector(
-            self.env,
-            self.ppo_actor,
-            frames_per_batch=frames_per_batch,
-            total_frames=total_frames,
-            split_trajs=False,
-            device=device,
-        )
+        if self.config["num_env"] == 1:
+            collector = SyncDataCollector(
+                self.env if self.env else self.env_fn,
+                self.ppo_actor,
+                frames_per_batch=frames_per_batch,
+                total_frames=total_frames,
+                split_trajs=False,
+                device=device,
+            )
+        else:
+            if self.env_fn is None:
+                raise ValueError(
+                    "for num_env > 1, PPOAlgo needs to be initialized with env_fn and env_specs and not env"
+                )
+            collector = MultiSyncDataCollector(
+                [self.env_fn] * self.config["num_env"],
+                self.ppo_actor,
+                frames_per_batch=frames_per_batch,
+                total_frames=total_frames,
+                split_trajs=False,
+                device=device,
+            )
 
         replay_buffer = ReplayBuffer(
             storage=LazyTensorStorage(max_size=frames_per_batch),
