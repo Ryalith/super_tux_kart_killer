@@ -57,3 +57,12 @@ def make_discrete_env():
         agent=pystk2_gymnasium.AgentSpec(use_ai=False, name="STKKillerAI"),
     )
     return env
+
+
+def make_discrete_env_for_render():
+    env = GymEnv(
+        "supertuxkart/flattened_multidiscrete-v0",
+        render_mode="human",
+        agent=pystk2_gymnasium.AgentSpec(use_ai=False, name="STKKillerAI"),
+    )
+    return env

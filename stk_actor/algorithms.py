@@ -94,6 +94,9 @@ class PPOAlgo:
             leave=False,
             position=1,
         )
+        self.writer.add_scalar(
+            "reward", tensordict_data["next"]["reward"].mean(), self.global_step
+        )
 
         for _ in batch_pbar:
             subdata = replay_buffer.sample(sub_batch_size)
@@ -112,6 +115,9 @@ class PPOAlgo:
             self.writer.add_scalar(
                 "loss_entropy/train", loss_vals["loss_entropy"], self.global_step
             )
+            self.writer.add_scalar(
+                "advantage", subdata["advantage"].mean(), self.global_step
+            )
             optim.zero_grad()
             loss_value.backward()
             if self.config["max_grad_norm"] is not None:
@@ -121,7 +127,11 @@ class PPOAlgo:
             optim.step()
             self.global_step += 1
 
-    def train(self, total_frames, frames_per_batch, sub_batch_size, device):
+    def train(self, total_frames, frames_per_batch, sub_batch_size, device, save=True):
+        def custom_postprocess_fn(tensor_dict):
+            tensor_dict["reward"] = tensor_dict.get("reward", None)
+            return tensor_dict
+
         # TODO: check better collectors for parallel execution
         if self.config["num_env"] == 1:
             collector = SyncDataCollector(
@@ -190,8 +200,8 @@ class PPOAlgo:
                 device,
             )
             scheduler.step()
-
-        self.save_checkpoint()
+        if save:
+            self.save_checkpoint()
 
     def load_checkpoint(self, checkpoint_path: Path):
         checkpoint = torch.load(checkpoint_path, map_location="cpu")
@@ -219,8 +229,8 @@ if __name__ == "__main__":
     obs, info = env.reset()
     print("Reset OK, obs shape:", obs.shape if hasattr(obs, "shape") else type(obs))
     env.close()
-    # ppo = PPOAlgo(env)
-    # ppo.train(128*100, 128, 32, "cpu")
+    ppo = PPOAlgo(env)
+    ppo.train(128 * 100, 128, 32, "cpu", False)
 
 
 # class SACAlgo:
