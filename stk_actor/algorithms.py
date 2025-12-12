@@ -173,10 +173,11 @@ class PPOAlgo:
 
         self.save_checkpoint()
 
-    def load_checkpoint(self, checkpoint_path: Path):
+    def load_checkpoint(self, checkpoint_path: Path, actor_only = False):
         checkpoint = torch.load(checkpoint_path, map_location="cpu")
         self.ppo_actor.load_state_dict(checkpoint["ppo_actor_state_dict"])
-        self.v_critic.load_state_dict(checkpoint["v_critic_state_dict"])
+        if not actor_only:
+            self.v_critic.load_state_dict(checkpoint["v_critic_state_dict"])
 
     def save_checkpoint(self, checkpoint_path: Path | None = None):
         checkpoint_path = (

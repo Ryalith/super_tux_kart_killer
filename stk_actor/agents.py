@@ -268,8 +268,12 @@ class PPODiscreteProbaActor(ProbabilisticActor):
         env_specs,
         hidden_net_dims: Sequence[int],
     ):
-        input_dim = get_observation_vector_dim(env_specs)
-        action_dims = get_action_vector_dims(env_specs)
+        if env_specs is not None:
+            input_dim = get_observation_vector_dim(env_specs)
+            action_dims = get_action_vector_dims(env_specs)
+        else:
+            input_dim = 154
+            action_dims = [5, 2, 2, 2, 2, 2, 7]
 
         policy_net = PPODiscretePolicyNet(input_dim, hidden_net_dims, action_dims)
 
