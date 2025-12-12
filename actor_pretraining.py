@@ -10,6 +10,9 @@ import numpy as np
 from tqdm import tqdm
 import random
 import pickle
+from torch.utils.tensorboard import SummaryWriter
+from datetime import datetime
+import os
 
 action_dims = [5, 2, 2, 2, 2, 2, 7]
 cum = [0]
@@ -80,6 +83,7 @@ def bc_loss(targets, logits):
 
     per_head_losses = torch.stack(per_head_losses, dim=0).T # (B, 7)
     loss = per_head_losses.mean()
+    correct = torch.stack(correct)
 
     return loss, correct, targets.shape[0] 
 
@@ -93,6 +97,9 @@ class StateDataset(Dataset):
     def __getitem__(self, idx):
         return self.states[idx]
 
+    def add(self, states):
+        self.states += states
+
 def collate_fn(states):
     actions = torch.tensor(np.array([s['action'] for s in states]))
 
@@ -100,19 +107,27 @@ def collate_fn(states):
 
 if __name__ == '__main__':
 
-    states_path = "/home/gael/Documents/MS2A/4_RL/super_tux_kart_killer/pretrain_training_states_100000.pkl"
+    states_path1 = "/home/gael/Documents/MS2A/4_RL/super_tux_kart_killer/pretrain_training_states_100000.pkl"
+    states_path2 = "/home/gael/Documents/MS2A/4_RL/super_tux_kart_killer/pretrain_training_states_500000.pkl"
 
+    current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
+    logdir = os.path.join("/home/gael/Documents/MS2A/4_RL/super_tux_kart_killer/runs-pretraining", f"{current_time}-PPO")
+    os.makedirs(logdir, exist_ok=True)
+    writer = SummaryWriter(logdir)
 
     # Load the states from the given path
-    with open(states_path, "rb") as f:
+    with open(states_path1, "rb") as f:
         training_states = pickle.load(f)
+
+    with open(states_path2, "rb") as f:
+        training_states += pickle.load(f)
 
     num_steps = len(training_states)
 
     random.shuffle(training_states)
 
     # Split training_states into train and val
-    split_ratio = 0.8
+    split_ratio = 0.9
     split_idx = int(num_steps * split_ratio)
     train_states = training_states[:split_idx]
     val_states = training_states[split_idx:]
@@ -124,36 +139,51 @@ if __name__ == '__main__':
     val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False, collate_fn=collate_fn)
 
     ppo_actor = stk_actor.agents.PPODiscreteProbaActor(
-            None, [128, 128, 128]
+            None, [512, 512, 512]
         )    
 
-    ppo_actor = ppo_actor
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    ppo_actor = ppo_actor.to(device)
 
     print("Starting training")
-    num_epochs = 5
+    num_epochs = 20
     optim = torch.optim.Adam(ppo_actor.parameters(), lr = 1e-3)
 
     global_step = 0
     for epoch in tqdm(range(num_epochs)):
         for obs_td, actions in train_loader:
+            obs_td = obs_td.to(device)
+            actions = actions.to(device)
             optim.zero_grad()
             logits = ppo_actor(obs_td)['logits']
             loss, correct, total = bc_loss(actions, logits)
-            acc = np.array(correct) / total
+            acc = correct / total
+            if global_step % 100 == 0:
+                writer.add_scalar("Loss/train", loss, global_step)
+                writer.add_scalar("Accuracy/train", acc.mean(), global_step)
+                writer.add_scalar(f"Accuracy/{6}/train", acc[6], global_step)
             loss.backward()
             optim.step()
             global_step += 1
 
         with torch.no_grad():
-            correct_pred = np.zeros(7)
+            correct_pred = torch.zeros(7, device = device)
             total_pred = 0
+            total_loss = 0
             for obs_td, actions in train_loader:
+                obs_td = obs_td.to(device)
+                actions = actions.to(device)
                 logits = ppo_actor(obs_td)['logits']
                 loss, correct, total = bc_loss(actions, logits)
-                correct_pred += np.array(correct)
+                total_loss += loss * total
+                correct_pred += correct
                 total_pred += total
             acc = correct_pred / total_pred
-            print(f"Accuracy: {acc}")
+            
+            writer.add_scalar("Loss/test", total_loss / total_pred, global_step)
+            writer.add_scalar("Accuracy/test", acc.mean(), global_step)
+            writer.add_scalar(f"Accuracy/{6}/test", acc[6], global_step)
+            print(f"Accuracy: {acc}, Loss: {total_loss / total_pred}")
             
         
 
