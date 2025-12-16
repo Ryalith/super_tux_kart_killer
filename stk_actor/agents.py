@@ -180,7 +180,7 @@ class MultiCategorical(d.Distribution):
         # TODO: for loop and gather
         start = 0
         all_logits = self.logits
-        log_pmf = torch.zeros(values.shape[:-1])
+        log_pmf = torch.zeros(values.shape[:-1], device = all_logits.device)
         for i, n_cat in enumerate(self._n_categories):
             value = values[..., i]
             logits = all_logits[..., start : start + n_cat]
