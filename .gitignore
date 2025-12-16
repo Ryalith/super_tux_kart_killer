@@ -1,2 +1,6 @@
 __pycache__
 runs
+ckpts
+states
+runs-pretraining
+.vscode
