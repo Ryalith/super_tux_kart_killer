@@ -29,6 +29,44 @@ from .agents import PPODiscreteProbaActor, PPOValueOperator
 from .data import get_data_folder, set_data_folder
 
 
+class SACAlgo:
+    default_config = ...
+
+    def __init__(self, env, config: dict | None = None): ...
+
+    def _train_one_epoch(
+        self,
+        tensordict_data,
+        advantage_module,
+        loss_module,
+        optim,
+        replay_buffer,
+        frames_per_batch,
+        sub_batch_size,
+        device,
+    ): ...
+
+    def train(self, total_frames, frames_per_batch, sub_batch_size, device): ...
+
+    def load_checkpoint(self, checkpoint_path: Path, actor_only=False):
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        self.ppo_actor.load_state_dict(checkpoint["ppo_actor_state_dict"])
+        if not actor_only:
+            self.v_critic.load_state_dict(checkpoint["v_critic_state_dict"])
+
+    def save_checkpoint(self, checkpoint_path: Path | None = None):
+        checkpoint_path = (
+            os.path.join(self.logdir, f"PPO-{self.global_step}.ckpt")
+            if checkpoint_path is None
+            else checkpoint_path
+        )
+        checkpoint = {
+            "ppo_actor_state_dict": self.ppo_actor.state_dict(),
+            "v_critic_state_dict": self.v_critic.state_dict(),
+        }
+        torch.save(checkpoint, checkpoint_path)
+
+
 class PPOAlgo:
     default_config = {
         "buffer_capactiy": 1024,
@@ -173,7 +211,7 @@ class PPOAlgo:
 
         self.save_checkpoint()
 
-    def load_checkpoint(self, checkpoint_path: Path, actor_only = False):
+    def load_checkpoint(self, checkpoint_path: Path, actor_only=False):
         checkpoint = torch.load(checkpoint_path, map_location="cpu")
         self.ppo_actor.load_state_dict(checkpoint["ppo_actor_state_dict"])
         if not actor_only:
