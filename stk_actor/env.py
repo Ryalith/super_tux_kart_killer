@@ -50,9 +50,18 @@ def get_action_vector_dims(env_specs):
     return [box.n for box in act_spec.space]
 
 
-def make_discrete_env(render_mode = None, use_ai = False):
+def make_discrete_env(render_mode=None, use_ai=False):
     env = GymEnv(
         "supertuxkart/flattened_multidiscrete-v0",
+        render_mode=render_mode,
+        agent=pystk2_gymnasium.AgentSpec(use_ai=use_ai, name="STKKillerAI"),
+    )
+    return env
+
+
+def make_mixed_env(render_mode=None, use_ai=False):
+    env = GymEnv(
+        "supertuxkart/flattened_continuous_actions-v0",
         render_mode=render_mode,
         agent=pystk2_gymnasium.AgentSpec(use_ai=use_ai, name="STKKillerAI"),
     )
