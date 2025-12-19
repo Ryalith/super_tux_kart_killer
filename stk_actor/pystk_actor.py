@@ -3,17 +3,14 @@ import gymnasium as gym
 import torch
 import torch.nn as nn
 from pathlib import Path
-from stable_baselines3 import SAC
-from stable_baselines3.common.policies import BasePolicy
 from bbrl.agents import Agent
-from tensordict import TensorDict
-import numpy as np
+import zipfile
 
 #: The base environment name (you can change that)
 env_name = "supertuxkart/flattened_continuous_actions-v0"
 
 #: Player name (you must change that)
-player_name = "Tuxy"
+player_name = "Tuxyz"
 
 
 def get_wrappers() -> List[Callable[[gym.Env], gym.Wrapper]]:
@@ -49,23 +46,92 @@ class RandomActorAgent(Agent):
         self.set(("action", t), action_tensor)
 
 
-class SB3ActorAgent(Agent):
+class NativeSACPolicy(nn.Module):
     """
-    BBRL Agent that wraps an SB3 policy.
-    Writes actions to the 'action' key in workspace.
-    This is NOT a temporal agent - it processes each step independently.
+    Native PyTorch implementation of SB3's MultiInputPolicy for SAC.
+    This matches the architecture used by SB3's MultiInputPolicy.
     """
     
-    def __init__(self, sb3_policy: BasePolicy, deterministic: bool = True, name: str = "sb3_actor"):
+    def __init__(self, continuous_dim: int, discrete_dim: int, action_dim: int, net_arch: list = [256, 256]):
+        super().__init__()
+        
+        # Feature extractor: process continuous and discrete observations
+        # SB3 uses separate feature extractors then concatenates
+        self.continuous_feature_dim = continuous_dim
+        self.discrete_feature_dim = discrete_dim
+        
+        # Build shared feature extractor layers
+        # Input: continuous + discrete (one-hot encoded)
+        input_dim = continuous_dim + discrete_dim
+        
+        # Build MLP layers
+        layers = []
+        prev_dim = input_dim
+        for hidden_dim in net_arch:
+            layers.append(nn.Linear(prev_dim, hidden_dim))
+            layers.append(nn.ReLU())
+            prev_dim = hidden_dim
+        
+        self.feature_extractor = nn.Sequential(*layers)
+        
+        # Actor head: outputs mean and log_std for continuous actions
+        self.latent_pi = prev_dim
+        self.mean_actions = nn.Linear(self.latent_pi, action_dim)
+        self.log_std = nn.Linear(self.latent_pi, action_dim)
+        
+    def forward(self, continuous: torch.Tensor, discrete: torch.Tensor) -> torch.Tensor:
         """
-        :param sb3_policy: The SB3 policy to wrap
-        :param deterministic: Whether to use deterministic (mode) or stochastic actions
+        Forward pass: returns deterministic action (mean).
+        
+        :param continuous: Continuous observation tensor
+        :param discrete: Discrete observation tensor (one-hot encoded)
+        :return: Action tensor
+        """
+        # Concatenate continuous and discrete features
+        features = torch.cat([continuous, discrete], dim=-1)
+        
+        # Extract features through MLP
+        latent = self.feature_extractor(features)
+        
+        # Get mean action
+        mean = self.mean_actions(latent)
+        
+        # For deterministic actions, return mean (tanh squashed)
+        action = torch.tanh(mean)
+        
+        return action
+    
+    def get_action_distribution(self, continuous: torch.Tensor, discrete: torch.Tensor):
+        """
+        Get action distribution (for stochastic sampling if needed).
+        """
+        features = torch.cat([continuous, discrete], dim=-1)
+        latent = self.feature_extractor(features)
+        
+        mean = self.mean_actions(latent)
+        log_std = self.log_std(latent)
+        # Clamp log_std to reasonable range
+        log_std = torch.clamp(log_std, -20, 2)
+        
+        return mean, log_std
+
+
+class NativeSACActorAgent(Agent):
+    """
+    BBRL Agent using native PyTorch policy (no SB3 dependency).
+    Writes actions to the 'action' key in workspace.
+    """
+    
+    def __init__(self, policy_net: nn.Module, deterministic: bool = True, name: str = "native_sac_actor"):
+        """
+        :param policy_net: Native PyTorch policy network
+        :param deterministic: Whether to use deterministic (mean) or stochastic actions
         :param name: Name of the agent
         """
         super().__init__(name=name)
-        self.sb3_policy = sb3_policy
+        self.policy_net = policy_net
         self.deterministic = deterministic
-        self.sb3_policy.eval()  # Set to evaluation mode
+        self.policy_net.eval()  # Set to evaluation mode
     
     def forward(self, t: int, **kwargs):
         """
@@ -74,7 +140,6 @@ class SB3ActorAgent(Agent):
         :param t: Time step (BBRL passes this as positional argument)
         """
         # Retrieve observations from workspace using self.get()
-        # BBRL/master-mind uses "env/env_obs/continuous" and "env/env_obs/discrete" keys
         obs_continuous = self.get(("env/env_obs/continuous", t))
         
         # Try to get discrete observation if it exists
@@ -82,65 +147,98 @@ class SB3ActorAgent(Agent):
         try:
             obs_discrete = self.get(("env/env_obs/discrete", t))
         except (KeyError, AttributeError):
-            # Discrete observation not available
-            pass
-        
-        # Convert observations to numpy and prepare for SB3
-        # BBRL stores tensors with batch/time dimensions, we need to extract the right slice
-        if obs_continuous.ndim > 1:
-            # Remove batch/time dimensions - get the actual observation
-            obs_continuous_np = obs_continuous.squeeze().cpu().numpy()
-        else:
-            obs_continuous_np = obs_continuous.cpu().numpy()
-        
-        # Ensure it's 1D
-        if obs_continuous_np.ndim == 0:
-            obs_continuous_np = obs_continuous_np[np.newaxis]
-        elif obs_continuous_np.ndim > 1:
-            obs_continuous_np = obs_continuous_np.flatten()
-        
-        # Construct observation dict for SB3
-        obs_for_sb3 = {"continuous": obs_continuous_np}
-        
-        if obs_discrete is not None:
-            if obs_discrete.ndim > 1:
-                obs_discrete_np = obs_discrete.squeeze().cpu().numpy()
+            # Discrete observation not available - use zeros
+            # Get shape from continuous observation
+            if obs_continuous.ndim > 1:
+                batch_size = obs_continuous.shape[0]
             else:
-                obs_discrete_np = obs_discrete.cpu().numpy()
-            
-            # Ensure it's 1D
-            if obs_discrete_np.ndim == 0:
-                obs_discrete_np = obs_discrete_np[np.newaxis]
-            elif obs_discrete_np.ndim > 1:
-                obs_discrete_np = obs_discrete_np.flatten()
-            
-            obs_for_sb3["discrete"] = obs_discrete_np
+                batch_size = 1
+            # SB3 uses one-hot encoding for discrete observations
+            # MultiDiscrete([10, 7, 7, 7, 7, 7, 2, 4, 11]) = 9 dimensions
+            # One-hot encoding: sum([10, 7, 7, 7, 7, 7, 2, 4, 11]) = 62 dimensions
+            discrete_dim = 62  # Sum of MultiDiscrete nvec
+            obs_discrete = torch.zeros((batch_size, discrete_dim), dtype=torch.float32, device=obs_continuous.device)
         
-        # Get action from SB3 policy
+        # Handle batch dimensions
+        if obs_continuous.ndim == 1:
+            obs_continuous = obs_continuous.unsqueeze(0)
+        if obs_discrete.ndim == 1:
+            obs_discrete = obs_discrete.unsqueeze(0)
+        
+        # Convert discrete to one-hot if needed (if it's integer indices)
+        if obs_discrete.dtype in (torch.int64, torch.int32, torch.long):
+            # Convert MultiDiscrete indices to one-hot encoding
+            # MultiDiscrete nvec: [10, 7, 7, 7, 7, 7, 2, 4, 11] = 9 dimensions
+            # One-hot: sum([10, 7, 7, 7, 7, 7, 2, 4, 11]) = 62 dimensions
+            nvec = [10, 7, 7, 7, 7, 7, 2, 4, 11]
+            batch_size = obs_discrete.shape[0]
+            one_hot_list = []
+            for i, n in enumerate(nvec):
+                # Get the i-th discrete value for all batches
+                if obs_discrete.shape[1] == len(nvec):
+                    discrete_val = obs_discrete[:, i]
+                else:
+                    # Assume it's already flattened one-hot
+                    break
+                # Create one-hot encoding
+                one_hot = torch.zeros((batch_size, n), dtype=torch.float32, device=obs_discrete.device)
+                one_hot.scatter_(1, discrete_val.long().unsqueeze(1), 1.0)
+                one_hot_list.append(one_hot)
+            if one_hot_list:
+                # Concatenate all one-hot encodings
+                obs_discrete = torch.cat(one_hot_list, dim=1)
+            else:
+                # Already in one-hot format or wrong shape - use as is
+                obs_discrete = obs_discrete.float()
+        else:
+            # Already float (likely one-hot), ensure it's the right dtype
+            obs_discrete = obs_discrete.float()
+        
+        # Get action from policy network
         with torch.no_grad():
-            action, _ = self.sb3_policy.predict(obs_for_sb3, deterministic=self.deterministic)
+            if self.deterministic:
+                action = self.policy_net(obs_continuous, obs_discrete)
+            else:
+                mean, log_std = self.policy_net.get_action_distribution(obs_continuous, obs_discrete)
+                std = torch.exp(log_std)
+                # Sample from normal distribution
+                action = torch.tanh(mean + std * torch.randn_like(mean))
         
-        # Convert action to tensor
-        action_tensor = torch.as_tensor(action, dtype=torch.float32)
-        
-        # Ensure action is 1D with shape (action_dim,)
-        if action_tensor.ndim == 0:
-            action_tensor = action_tensor.unsqueeze(0)
-        elif action_tensor.ndim > 1:
-            # Remove extra dimensions
-            action_tensor = action_tensor.squeeze()
-            if action_tensor.ndim == 0:
-                action_tensor = action_tensor.unsqueeze(0)
-        
-        # BBRL stores tensors with batch dimensions to match observations
-        # The observations have shape [1, obs_dim], so we should store action as [1, action_dim]
-        # This ensures the wrapper can properly slice it
-        if action_tensor.ndim == 1:
-            # Add batch dimension to match observation format
-            action_tensor = action_tensor.unsqueeze(0)  # Shape: [1, action_dim]
+        # Ensure action has batch dimension [1, action_dim]
+        if action.ndim == 1:
+            action = action.unsqueeze(0)
         
         # Store action in workspace using self.set()
-        self.set(("action", t), action_tensor)
+        self.set(("action", t), action)
+
+
+def load_sb3_checkpoint(checkpoint_path: str):
+    """
+    Load SB3 checkpoint and extract policy weights and architecture info.
+    Returns state_dict and metadata without requiring SB3 at runtime.
+    """
+    checkpoint_path = Path(checkpoint_path)
+    if not checkpoint_path.exists():
+        # Try with .zip extension
+        checkpoint_path = checkpoint_path.with_suffix('.zip')
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+    
+    # Load the zip file
+    with zipfile.ZipFile(checkpoint_path, 'r') as zip_file:
+        # SB3 saves policy as 'policy.pth' which is a standard PyTorch state dict
+        if 'policy.pth' not in zip_file.namelist():
+            raise ValueError(f"Checkpoint {checkpoint_path} does not contain 'policy.pth'. "
+                           "This checkpoint format is not supported.")
+        
+        # Load policy state dict directly
+        with zip_file.open('policy.pth', 'r') as f:
+            policy_state_dict = torch.load(f, map_location='cpu')
+        
+        # Metadata is not strictly necessary - we can infer it from observation/action spaces
+        metadata = {}
+    
+    return policy_state_dict, metadata
 
 
 def get_actor(
@@ -189,25 +287,93 @@ def get_actor(
                 checkpoint_path = str(path)
                 break
     
-    # Create a dummy env to load the SB3 model (needed for proper initialization)
-    from pystk2_gymnasium import AgentSpec
-    dummy_env = gym.make(env_name, render_mode=None, agent=AgentSpec(use_ai=False))
-    
     try:
-        # Load SB3 model
-        sb3_model = SAC.load(checkpoint_path, env=dummy_env)
+        # Load checkpoint and extract policy weights
+        policy_state_dict, metadata = load_sb3_checkpoint(checkpoint_path)
         
-        # Extract the policy
-        sb3_policy = sb3_model.policy
+        # Extract architecture info from state dict keys
+        # SB3 uses keys like: 'mlp_extractor.policy_net.0.weight', etc.
+        # We need to infer the architecture from the weights
         
-        # Create BBRL agent wrapping the SB3 policy
-        agent = SB3ActorAgent(
-            sb3_policy=sb3_policy,
+        # Get observation and action dimensions from metadata or state dict
+        obs_space = metadata.get('observation_space')
+        if obs_space is None:
+            # Fallback: use provided observation_space
+            obs_space = observation_space
+        
+        if isinstance(obs_space, gym.spaces.Dict):
+            continuous_dim = obs_space['continuous'].shape[0]
+            # Discrete: MultiDiscrete([10, 7, 7, 7, 7, 7, 2, 4, 11])
+            # One-hot encoding: sum of all nvec
+            discrete_nvec = obs_space['discrete'].nvec
+            discrete_dim = int(discrete_nvec.sum())
+        else:
+            # Fallback dimensions
+            continuous_dim = 92
+            discrete_dim = 62
+        
+        action_dim = action_space.shape[0]
+        
+        # Extract net_arch from policy_kwargs or infer from state dict
+        policy_kwargs = metadata.get('policy_kwargs', {})
+        net_arch = policy_kwargs.get('net_arch', [256, 256])
+        if isinstance(net_arch, dict):
+            # SB3 uses dict format like {'pi': [256, 256], 'vf': [256, 256]}
+            net_arch = net_arch.get('pi', [256, 256])
+        
+        # Create native policy network
+        policy_net = NativeSACPolicy(
+            continuous_dim=continuous_dim,
+            discrete_dim=discrete_dim,
+            action_dim=action_dim,
+            net_arch=net_arch
+        )
+        
+        # Load weights - need to map SB3 keys to our keys
+        # SB3 SAC uses: actor.latent_pi.* -> feature_extractor.*
+        #                actor.mu.* -> mean_actions.*
+        #                actor.log_std.* -> log_std.*
+        # We ignore critic keys (qf0, qf1) as we only need the policy for inference
+        our_state_dict = {}
+        for key, value in policy_state_dict.items():
+            # Skip critic network weights - we only need the actor/policy
+            if key.startswith('critic.'):
+                continue
+            
+            new_key = key
+            # Map SB3 keys to our keys
+            if key.startswith('actor.latent_pi.'):
+                # actor.latent_pi.0.weight -> feature_extractor.0.weight
+                new_key = key.replace('actor.latent_pi.', 'feature_extractor.')
+            elif key.startswith('actor.mu.'):
+                # actor.mu.weight -> mean_actions.weight
+                new_key = key.replace('actor.mu.', 'mean_actions.')
+            elif key.startswith('actor.log_std.'):
+                # actor.log_std.weight -> log_std.weight
+                new_key = key.replace('actor.log_std.', 'log_std.')
+            elif 'mlp_extractor.policy_net' in key:
+                # Fallback for other SB3 versions
+                new_key = key.replace('mlp_extractor.policy_net', 'feature_extractor')
+            elif 'mlp_extractor.shared_net' in key:
+                # Fallback for other SB3 versions
+                new_key = key.replace('mlp_extractor.shared_net', 'feature_extractor')
+            elif 'action_net' in key:
+                # Fallback for other SB3 versions
+                new_key = key.replace('action_net', 'mean_actions')
+            
+            our_state_dict[new_key] = value
+        
+        # Load the mapped state dict (strict=False to handle any mismatches)
+        policy_net.load_state_dict(our_state_dict, strict=False)
+        
+        # Create BBRL agent with native policy
+        agent = NativeSACActorAgent(
+            policy_net=policy_net,
             deterministic=True,  # Use deterministic actions for evaluation
-            name="sb3_actor"
+            name="native_sac_actor"
         )
         
         return agent
         
-    finally:
-        dummy_env.close()
+    except Exception as e:
+        raise RuntimeError(f"Failed to load checkpoint {checkpoint_path}: {e}") from e
