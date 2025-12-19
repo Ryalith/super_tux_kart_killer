@@ -48,7 +48,7 @@ keep_indices = (
     + list(range(82, 87))   # paths_width[0:5, 0:1]
     + [89, 90, 91]          # velocity[0:3]
 )
-env = ContinuousSubsetWrapper(env, keep_indices=keep_indices)
+# env = ContinuousSubsetWrapper(env, keep_indices=keep_indices)
 
 # Drop the discrete part: make the observation a pure Box by using only 'continuous'
 class ContinuousOnlyWrapper(gym.ObservationWrapper):
@@ -64,25 +64,25 @@ class ContinuousOnlyWrapper(gym.ObservationWrapper):
         # Return only the continuous vector
         return obs["continuous"]
 
-env = ContinuousOnlyWrapper(env)
+# env = ContinuousOnlyWrapper(env)
 
 # Load model WITH the environment so SB3 can properly reconstruct observation/action spaces
 print("Loading model...")
-model = SAC.load("/home/gael/Documents/MS2A/4_RL/super_tux_kart_killer/sac_stk-600000.zip", env=env)
+model = SAC.load("/home/gael/Documents/MS2A/4_RL/super_tux_kart_killer/sac_stk-600000-fullobs.zip", env=env)
 
 print("Testing")
 obs, info = env.reset()
-print(f"Observation shape: {obs.shape}, Observation space: {env.observation_space}")
-print(f"Model observation space: {model.observation_space}")
-print(f"Action space: {env.action_space}")
-print(f"Model action space: {model.action_space}")
+# print(f"Observation shape: {obs.shape}, Observation space: {env.observation_space}")
+# print(f"Model observation space: {model.observation_space}")
+# print(f"Action space: {env.action_space}")
+# print(f"Model action space: {model.action_space}")
 
-# Verify spaces match
-assert model.observation_space == env.observation_space, \
-    f"Observation space mismatch! Model: {model.observation_space}, Env: {env.observation_space}"
-assert model.action_space == env.action_space, \
-    f"Action space mismatch! Model: {model.action_space}, Env: {env.action_space}"
-print("✓ Observation and action spaces match!")
+# # Verify spaces match
+# assert model.observation_space == env.observation_space, \
+#     f"Observation space mismatch! Model: {model.observation_space}, Env: {env.observation_space}"
+# assert model.action_space == env.action_space, \
+#     f"Action space mismatch! Model: {model.action_space}, Env: {env.action_space}"
+# print("✓ Observation and action spaces match!")
 
 total_reward = 0
 step = 0
@@ -94,10 +94,12 @@ while not done:
     total_reward += reward
     step += 1
     print(f"  reward = {reward:.3f}, total = {total_reward:.3f}, info: {info}")
+    # print(obs['discrete'])
     if terminated or truncated:
         print(f"Episode ended after {step} steps with total reward {total_reward:.3f}")
         # done = True
         obs, info = env.reset()
+        
         total_reward = 0
         step = 0
 
