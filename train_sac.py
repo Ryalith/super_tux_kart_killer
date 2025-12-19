@@ -31,31 +31,18 @@ class RenderCallback(BaseCallback):
 
             if self._episodes % self.render_every_n_episodes == 0:
                 # Separate env with rendering for visualization.
-                # Apply the same observation processing as in training:
+                # Match the training environment exactly (no wrappers currently):
                 eval_env = gym.make(
                     "supertuxkart/flattened_continuous_actions-v0",
                     render_mode="human",
                     agent=AgentSpec(use_ai=False),
                 )
-                keep_indices = (
-                    [
-                        2, 3, 4,  # center_path[0:3]
-                        5,        # center_path_distance[0]
-                        6,        # distance_down_track[0]
-                        8, 9, 10  # front[0:3]
-                    ]
-                    + list(range(42, 52))   # paths_distance[0:5, 0:2]
-                    + list(range(52, 67))   # paths_end[0:5, 0:3]
-                    + list(range(67, 82))   # paths_start[0:5, 0:3]
-                    + list(range(82, 87))   # paths_width[0:5, 0:1]
-                    + [89, 90, 91]          # velocity[0:3]
-                )
-
-                eval_env = ContinuousSubsetWrapper(eval_env, keep_indices=keep_indices)
-
-                # eval_env = RewardClipWrapper(eval_env, log_extreme=True)
-
-                eval_env = ContinuousOnlyWrapper(eval_env)
+                # Apply the same wrappers as training (currently none are active)
+                # If you uncomment wrappers in training, uncomment them here too:
+                # keep_indices = (...)
+                # eval_env = ContinuousSubsetWrapper(eval_env, keep_indices=keep_indices)
+                # eval_env = ContinuousOnlyWrapper(eval_env)
+                
                 total_reward = 0
                 obs, info = eval_env.reset()
                 done = False
@@ -80,42 +67,45 @@ class RewardClipWrapper(gym.RewardWrapper):
     def __init__(
         self,
         env: gym.Env,
-        max_distance_delta: float = 100.0,
+        finish_reward_bonus: float = 100.0,
         log_extreme: bool = True,
     ):
         super().__init__(env)
-        self.max_distance_delta = max_distance_delta
+        self.finish_reward_bonus = finish_reward_bonus
         self.log_extreme = log_extreme
-        self.last_distance = None
-        
     
     def reset(self, **kwargs):           
-        self.last_distance = None
         obs, info = self.env.reset(**kwargs)
         return obs, info
 
+    def _is_race_finished(self, terminated=False):
+        """
+        Check if the race has finished by checking if episode was terminated.
+        Returns (is_finished: bool, reason: str)
+        """
+        if terminated:
+            return True, "Episode terminated"
+        return False, "No finish detected"
+
     def step(self, action):
         """
-        Intercept the reward and zero it out when the 'distance' field in info
-        changes abruptly, in addition to normal magnitude clipping.
+        Boost reward magnitude when the race finishes.
         """
         obs, reward, terminated, truncated, info = self.env.step(action)
 
-        # Detect abnormal distance jumps
-        distance = info.get("distance", None) if isinstance(info, dict) else None
-        if distance is not None:
-            distance_val = float(distance)
-            if self.last_distance is not None:
-                delta = abs(distance_val - self.last_distance)
-                if delta > self.max_distance_delta:
-                    if self.log_extreme:
-                        print(
-                            f"Big distance jump detected: Δ={delta:.2f} "
-                            f"(from {self.last_distance:.2f} to {distance_val:.2f}), reward clipped from {reward:.2f} to 0"
-                        )
-                    reward = 0.0
-            self.last_distance = distance_val
-            
+        # Check if race finished (episode terminated) to boost reward
+        race_finished, finish_reason = self._is_race_finished(terminated)
+
+        # Add bonus reward when race finishes (episode terminated)
+        if race_finished:
+            original_reward = reward
+            reward = reward + self.finish_reward_bonus
+            if self.log_extreme:
+                print(
+                    f"Race finished! Reason: {finish_reason}. "
+                    f"Reward boosted from {original_reward:.2f} to {reward:.2f} "
+                    f"(added bonus: {self.finish_reward_bonus})"
+                )
 
         return obs, reward, terminated, truncated, info
 
@@ -183,49 +173,49 @@ if __name__ == "__main__":
         + list(range(82, 87))   # paths_width[0:5, 0:1]
         + [89, 90, 91]          # velocity[0:3]
     )
-    env = ContinuousSubsetWrapper(env, keep_indices=keep_indices)
+    # env = ContinuousSubsetWrapper(env, keep_indices=keep_indices)
 
     # Drop the discrete part: make the observation a pure Box by using only 'continuous'
     
 
-    env = ContinuousOnlyWrapper(env)
+    # env = ContinuousOnlyWrapper(env)
 
-    # Clip rewards to prevent exploit bugs from dominating learning
-    # Cap at 100.0 per step (reasonable for racing rewards)
-    # env = RewardClipWrapper(env, log_extreme=True)
+    # Add 100 bonus reward when race finishes to strongly encourage completing races
+    env = RewardClipWrapper(env, finish_reward_bonus=300.0, log_extreme=True)
 
     # Increase exploration by targeting higher policy entropy
     action_dim = env.action_space.shape[0]
-    target_entropy = -0.25 * action_dim  # default is around -action_dim; this is more exploratory
+    target_entropy = -2 * action_dim  # default is around -action_dim; this is more exploratory
 
-    model = SAC(
-        "MlpPolicy",
-        env,
-        learning_rate=3e-4,
-        buffer_size=1_000_000,
-        learning_starts=100_000,
-        batch_size=256,
-        tau=0.005,
-        gamma=0.99,
-        train_freq=1,
-        gradient_steps=2,
-        ent_coef="auto",
-        target_entropy=target_entropy,
-        policy_kwargs=policy_kwargs,
-        verbose=1,
-        tensorboard_log=f"/home/gael/Documents/MS2A/4_RL/super_tux_kart_killer/runs/{current_time}-SAC",
-    )
+    # model = SAC(
+    #     # "MlpPolicy",
+    #     "MultiInputPolicy",
+    #     env,
+    #     learning_rate=3e-4,
+    #     buffer_size=1_000_000,
+    #     learning_starts=100_000,
+    #     batch_size=256,
+    #     tau=0.005,
+    #     gamma=0.99,
+    #     train_freq=1,
+    #     gradient_steps=2,
+    #     ent_coef="auto",
+    #     target_entropy=target_entropy,
+    #     policy_kwargs=policy_kwargs,
+    #     verbose=1,
+    #     tensorboard_log=f"/home/gael/Documents/MS2A/4_RL/super_tux_kart_killer/runs/{current_time}-SAC",
+    # )
 
-    # model = SAC.load("sac_stk-100000", env)
+    model = SAC.load("sac_stk-600000-fullobs", env=env)
 
     # Train longer to allow the agent to discover good driving behavior
-    render_callback = RenderCallback(render_every_n_episodes=10)
-    model.learn(total_timesteps=600_000, log_interval=1,
+    render_callback = RenderCallback(render_every_n_episodes=10, start_after_n_episodes=70)
+    model.learn(total_timesteps=200_000, log_interval=1,
      callback=render_callback
      )
 
     print("Saving")
-    model.save("sac_stk-600000")
+    model.save("sac_stk-700000-fullobs")
 
     del model  # free resources
 
