@@ -3,6 +3,7 @@
 # in the 'Define an environment' section
 from torchrl.envs import GymEnv
 import pystk2_gymnasium
+import gymnasium as gym
 
 
 def get_observation_vector_dim(env_specs):
@@ -64,5 +65,14 @@ def make_mixed_env(render_mode=None, use_ai=False):
         "supertuxkart/flattened_continuous_actions-v0",
         render_mode=render_mode,
         agent=pystk2_gymnasium.AgentSpec(use_ai=use_ai, name="STKKillerAI"),
+    )
+    return env
+
+
+def make_cont_env(render_mode=None, use_ai=False):
+    env = gym.make(
+        "supertuxkart/flattened_continuous_actions-v0",
+        render_mode=None,
+        agent=pystk2_gymnasium.AgentSpec(use_ai=False),
     )
     return env

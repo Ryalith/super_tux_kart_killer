@@ -15,7 +15,9 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import torch
+from stable_baselines3 import SAC
 from torch.utils.tensorboard import SummaryWriter
 from torchrl.collectors import SyncDataCollector
 from torchrl.data.replay_buffers import ReplayBuffer
@@ -29,6 +31,61 @@ from .agents import PPODiscreteProbaActor, PPOValueOperator
 from .data import get_data_folder, set_data_folder
 
 
+def SACAlgoSB(
+    train_env_fn,
+    training_steps=200_000,
+    ent_coeff=0.03,
+    name="sac_stk",
+):
+    current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
+
+    # pt_env = pt_env_fn()
+
+    # print("Collecting pretraining data")
+    # transitions = collect_baseline_data(pt_env, pretraining_steps)
+
+    # pt_env.close()
+
+    env = train_env_fn()
+
+    model = SAC(
+        "MultiInputPolicy",
+        env,
+        learning_rate=3e-4,
+        buffer_size=1000000,
+        learning_starts=0,
+        batch_size=1024,
+        tau=0.005,
+        gamma=0.995,
+        train_freq=1,
+        policy_kwargs=dict(net_arch=[256, 256]),
+        verbose=1,
+        ent_coef=ent_coeff,  # Dichotomy lead to 0.03
+        tensorboard_log=f"runs/{current_time}-SAC",
+    )
+
+    # print("Loading pretraining data into buffer")
+    # for trans in transitions:
+    #     model.replay_buffer.add(
+    #         obs=trans["obs"],
+    #         next_obs=trans["next_obs"],
+    #         action=trans["action"],
+    #         reward=trans["reward"],
+    #         done=trans["done"],
+    #         infos=[{}],
+    #     )
+
+    print("Starting online training with SB3")
+    model.learn(total_timesteps=training_steps, log_interval=1)
+
+    model.save(name)
+
+    env.close()
+
+    return model
+
+
+# TODO Reimpliment in torch if really needed
 class SACAlgo:
     default_config = ...
 
