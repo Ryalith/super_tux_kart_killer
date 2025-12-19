@@ -5,6 +5,7 @@ import torch.nn as nn
 from pathlib import Path
 from bbrl.agents import Agent
 import zipfile
+import os
 
 #: The base environment name (you can change that)
 env_name = "supertuxkart/flattened_continuous_actions-v0"
@@ -241,6 +242,46 @@ def load_sb3_checkpoint(checkpoint_path: str):
     return policy_state_dict, metadata
 
 
+def convert_sb3_to_native_state_dict(policy_state_dict: dict) -> dict:
+    """
+    Convert SB3 policy state dict keys to NativeSACPolicy format.
+    
+    SB3 SAC uses: actor.latent_pi.* -> feature_extractor.*
+                  actor.mu.* -> mean_actions.*
+                  actor.log_std.* -> log_std.*
+    """
+    our_state_dict = {}
+    for key, value in policy_state_dict.items():
+        # Skip critic network weights - we only need the actor/policy
+        if key.startswith('critic.'):
+            continue
+        
+        new_key = key
+        # Map SB3 keys to our keys
+        if key.startswith('actor.latent_pi.'):
+            # actor.latent_pi.0.weight -> feature_extractor.0.weight
+            new_key = key.replace('actor.latent_pi.', 'feature_extractor.')
+        elif key.startswith('actor.mu.'):
+            # actor.mu.weight -> mean_actions.weight
+            new_key = key.replace('actor.mu.', 'mean_actions.')
+        elif key.startswith('actor.log_std.'):
+            # actor.log_std.weight -> log_std.weight
+            new_key = key.replace('actor.log_std.', 'log_std.')
+        elif 'mlp_extractor.policy_net' in key:
+            # Fallback for other SB3 versions
+            new_key = key.replace('mlp_extractor.policy_net', 'feature_extractor')
+        elif 'mlp_extractor.shared_net' in key:
+            # Fallback for other SB3 versions
+            new_key = key.replace('mlp_extractor.shared_net', 'feature_extractor')
+        elif 'action_net' in key:
+            # Fallback for other SB3 versions
+            new_key = key.replace('action_net', 'mean_actions')
+        
+        our_state_dict[new_key] = value
+    
+    return our_state_dict
+
+
 def get_actor(
     state: dict | None,
     observation_space: gym.spaces.Space,
@@ -249,9 +290,16 @@ def get_actor(
     """Creates a new actor (BBRL agent) that writes into `action`
 
     :param state: The saved `stk_actor/pystk_actor.pth` (if it exists)
-                  This should be a dict with 'checkpoint_path' pointing to SB3 .zip file
-                  OR a path string to the checkpoint file.
-                  Example: torch.save({"checkpoint_path": "sac_stk-800000-fullobs"}, "pystk_actor.pth")
+                  Can be:
+                  1. A dict with converted policy weights (preferred - no path resolution needed)
+                  2. A dict with 'checkpoint_path' pointing to SB3 .zip file
+                  3. A path string to the checkpoint file
+                  
+                  Example (converted weights):
+                  torch.save(converted_state_dict, "pystk_actor.pth")
+                  
+                  Example (checkpoint path):
+                  torch.save({"checkpoint_path": "sac_stk-800000-fullobs"}, "pystk_actor.pth")
     :param observation_space: The environment observation space (with wrappers)
     :param action_space: The environment action space (with wrappers)
     :return: a BBRL agent
@@ -260,46 +308,88 @@ def get_actor(
     if state is None:
         return RandomActorAgent(action_space=action_space, name="random_actor")
     
-    # Determine checkpoint path from state
-    if isinstance(state, (str, Path)):
-        checkpoint_path = str(state)
-    elif isinstance(state, dict):
-        if "checkpoint_path" in state:
-            checkpoint_path = state["checkpoint_path"]
-        elif "path" in state:
-            checkpoint_path = state["path"]
+    # Check if state is already converted weights (has keys like 'feature_extractor', 'mean_actions', etc.)
+    if isinstance(state, dict):
+        # Check if it looks like converted weights (has our key format)
+        has_converted_keys = any(
+            key.startswith(('feature_extractor.', 'mean_actions.', 'log_std.'))
+            for key in state.keys()
+        )
+        
+        if has_converted_keys:
+            # This is already converted weights - use directly
+            our_state_dict = state
+            # Try to get metadata if available
+            metadata = state.get('_metadata', {})
+        elif "checkpoint_path" in state or "path" in state:
+            # This is a checkpoint path - need to load and convert
+            checkpoint_path = state.get("checkpoint_path") or state.get("path")
+            our_state_dict = None  # Will be loaded below
+            metadata = {}
         else:
-            raise ValueError("state dict must contain 'checkpoint_path' or 'path' key. "
-                           "Example: torch.save({'checkpoint_path': 'sac_stk-800000-fullobs'}, 'pystk_actor.pth')")
+            raise ValueError(
+                "state dict must contain either:\n"
+                "  1. Converted policy weights (keys like 'feature_extractor.*', 'mean_actions.*')\n"
+                "  2. 'checkpoint_path' or 'path' key pointing to SB3 checkpoint\n"
+                "Example: torch.save(converted_state_dict, 'pystk_actor.pth')"
+            )
+    elif isinstance(state, (str, Path)):
+        # This is a checkpoint path string
+        checkpoint_path = str(state)
+        our_state_dict = None  # Will be loaded below
+        metadata = {}
     else:
         raise ValueError(f"state must be str, Path, or dict, got {type(state)}")
     
-    # Handle relative paths - assume checkpoint is in the project root
-    if not Path(checkpoint_path).is_absolute():
-        # Try to find the checkpoint in common locations
-        project_root = Path(__file__).parent.parent
-        possible_paths = [
-            project_root / checkpoint_path,
-            project_root / f"{checkpoint_path}.zip",
-        ]
-        for path in possible_paths:
-            if path.exists():
-                checkpoint_path = str(path)
-                break
+    # If we need to load from checkpoint, do it now
+    if our_state_dict is None:
+        # Handle relative paths - look for checkpoint in the same directory as pystk_actor.pth
+        if not Path(checkpoint_path).is_absolute():
+            # The checkpoint should be in the same directory as this file (where pystk_actor.pth is)
+            file_dir = Path(__file__).parent
+            possible_paths = [
+                file_dir / checkpoint_path,  # Same directory as pystk_actor.py
+                file_dir / f"{checkpoint_path}.zip",
+            ]
+            
+            # Also try parent directory (project root) as fallback
+            parent_dir = file_dir.parent
+            possible_paths.extend([
+                parent_dir / checkpoint_path,
+                parent_dir / f"{checkpoint_path}.zip",
+            ])
+            
+            # Try each path until we find one that exists
+            found = False
+            for path in possible_paths:
+                if path.exists():
+                    checkpoint_path = str(path)
+                    found = True
+                    break
+            
+            if not found:
+                # If still not found, raise a more helpful error
+                raise FileNotFoundError(
+                    f"Checkpoint not found: {checkpoint_path}\n"
+                    f"Tried the following locations:\n" + 
+                    "\n".join(f"  - {p}" for p in possible_paths)
+                )
+        
+        try:
+            # Load checkpoint and extract policy weights
+            policy_state_dict, checkpoint_metadata = load_sb3_checkpoint(checkpoint_path)
+            metadata.update(checkpoint_metadata)
+            
+            # Convert SB3 format to our format
+            our_state_dict = convert_sb3_to_native_state_dict(policy_state_dict)
+        except Exception as e:
+            raise RuntimeError(f"Failed to load checkpoint {checkpoint_path}: {e}") from e
     
     try:
-        # Load checkpoint and extract policy weights
-        policy_state_dict, metadata = load_sb3_checkpoint(checkpoint_path)
-        
-        # Extract architecture info from state dict keys
-        # SB3 uses keys like: 'mlp_extractor.policy_net.0.weight', etc.
-        # We need to infer the architecture from the weights
-        
-        # Get observation and action dimensions from metadata or state dict
-        obs_space = metadata.get('observation_space')
-        if obs_space is None:
-            # Fallback: use provided observation_space
-            obs_space = observation_space
+        # Get observation and action dimensions
+        # Note: We don't store observation_space in metadata (to avoid weights_only issues),
+        # so we always use the provided observation_space parameter
+        obs_space = observation_space
         
         if isinstance(obs_space, gym.spaces.Dict):
             continuous_dim = obs_space['continuous'].shape[0]
@@ -314,9 +404,8 @@ def get_actor(
         
         action_dim = action_space.shape[0]
         
-        # Extract net_arch from policy_kwargs or infer from state dict
-        policy_kwargs = metadata.get('policy_kwargs', {})
-        net_arch = policy_kwargs.get('net_arch', [256, 256])
+        # Extract net_arch from metadata or infer from state dict
+        net_arch = metadata.get('net_arch', [256, 256])
         if isinstance(net_arch, dict):
             # SB3 uses dict format like {'pi': [256, 256], 'vf': [256, 256]}
             net_arch = net_arch.get('pi', [256, 256])
@@ -329,41 +418,7 @@ def get_actor(
             net_arch=net_arch
         )
         
-        # Load weights - need to map SB3 keys to our keys
-        # SB3 SAC uses: actor.latent_pi.* -> feature_extractor.*
-        #                actor.mu.* -> mean_actions.*
-        #                actor.log_std.* -> log_std.*
-        # We ignore critic keys (qf0, qf1) as we only need the policy for inference
-        our_state_dict = {}
-        for key, value in policy_state_dict.items():
-            # Skip critic network weights - we only need the actor/policy
-            if key.startswith('critic.'):
-                continue
-            
-            new_key = key
-            # Map SB3 keys to our keys
-            if key.startswith('actor.latent_pi.'):
-                # actor.latent_pi.0.weight -> feature_extractor.0.weight
-                new_key = key.replace('actor.latent_pi.', 'feature_extractor.')
-            elif key.startswith('actor.mu.'):
-                # actor.mu.weight -> mean_actions.weight
-                new_key = key.replace('actor.mu.', 'mean_actions.')
-            elif key.startswith('actor.log_std.'):
-                # actor.log_std.weight -> log_std.weight
-                new_key = key.replace('actor.log_std.', 'log_std.')
-            elif 'mlp_extractor.policy_net' in key:
-                # Fallback for other SB3 versions
-                new_key = key.replace('mlp_extractor.policy_net', 'feature_extractor')
-            elif 'mlp_extractor.shared_net' in key:
-                # Fallback for other SB3 versions
-                new_key = key.replace('mlp_extractor.shared_net', 'feature_extractor')
-            elif 'action_net' in key:
-                # Fallback for other SB3 versions
-                new_key = key.replace('action_net', 'mean_actions')
-            
-            our_state_dict[new_key] = value
-        
-        # Load the mapped state dict (strict=False to handle any mismatches)
+        # Load the converted state dict (strict=False to handle any mismatches)
         policy_net.load_state_dict(our_state_dict, strict=False)
         
         # Create BBRL agent with native policy
@@ -376,4 +431,4 @@ def get_actor(
         return agent
         
     except Exception as e:
-        raise RuntimeError(f"Failed to load checkpoint {checkpoint_path}: {e}") from e
+        raise RuntimeError(f"Failed to create actor: {e}") from e
